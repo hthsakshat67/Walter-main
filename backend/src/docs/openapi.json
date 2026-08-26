@@ -1,0 +1,93 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AI Receptionist & Appointment Automation SaaS API",
+    "version": "1.0.0",
+    "description": "Production API for appointments, customers, staff, availability calculation, AI tool execution, and unified messaging."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000/api/v1",
+      "description": "Local Development Server"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/auth/login": {
+      "post": {
+        "summary": "Authenticate user & return JWT token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": { "type": "string" },
+                  "password": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Successful login" }
+        }
+      }
+    },
+    "/appointments": {
+      "get": {
+        "summary": "List appointments for tenant",
+        "responses": { "200": { "description": "List of appointments" } }
+      },
+      "post": {
+        "summary": "Book a new appointment via core engine",
+        "responses": { "201": { "description": "Appointment created" } }
+      }
+    },
+    "/availability": {
+      "get": {
+        "summary": "Calculate available slots for service, staff, and date",
+        "parameters": [
+          { "name": "serviceId", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "staffId", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "date", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Available time slots" } }
+      }
+    },
+    "/ai/tools/execute": {
+      "post": {
+        "summary": "Execute safe LLM tool call",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "toolName": { "type": "string" },
+                  "arguments": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Tool result" } }
+      }
+    }
+  }
+}

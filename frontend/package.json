@@ -1,0 +1,12 @@
+{
+  "name": "walter-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npx live-server ./ --port=3001",
+    "build": "echo 'No build step needed for static files'"
+  },
+  "devDependencies": {
+    "live-server": "^1.2.2"
+  }
+}

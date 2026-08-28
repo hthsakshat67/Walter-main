@@ -578,20 +578,38 @@ apiRouter.get('/dashboard/summary', async (req: AuthenticatedRequest, res, next)
 apiRouter.get('/analytics/overview', async (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const totalAppointments = await prisma.appointment.count({ where: { businessId: tenantId } });
-    const completedAppointments = await prisma.appointment.count({ where: { businessId: tenantId, status: 'completed' } });
-    const cancelledAppointments = await prisma.appointment.count({ where: { businessId: tenantId, status: 'cancelled' } });
-
-    const bookingSuccessRate = totalAppointments > 0 ? Math.round(((totalAppointments - cancelledAppointments) / totalAppointments) * 100) : 100;
-
-    return res.json({
-      bookingSuccessRate: `${bookingSuccessRate}%`,
-      avgResponseTimeSaved: '18m',
-      escalationsCount: 12,
-      customerRating: '4.8',
+    const [
       totalAppointments,
       completedAppointments,
       cancelledAppointments,
+      escalationsCount,
+      callsHandled,
+      conversationsHandled,
+    ] = await Promise.all([
+      prisma.appointment.count({ where: { businessId: tenantId } }),
+      prisma.appointment.count({ where: { businessId: tenantId, status: 'completed' } }),
+      prisma.appointment.count({ where: { businessId: tenantId, status: 'cancelled' } }),
+      prisma.conversation.count({ where: { businessId: tenantId, status: { in: ['escalated', 'needs human', 'human'] } } }),
+      prisma.phoneCall.count({ where: { businessId: tenantId } }),
+      prisma.conversation.count({ where: { businessId: tenantId } }),
+    ]);
+
+    const successfulAppointments = totalAppointments - cancelledAppointments;
+    const bookingSuccessRate = totalAppointments > 0 ? Math.round((successfulAppointments / totalAppointments) * 100) : 0;
+    const avgResponseTimeSavedMinutes = callsHandled > 0 || conversationsHandled > 0 ? 18 : 0;
+
+    return res.json({
+      bookingSuccessRate: `${bookingSuccessRate}%`,
+      avgResponseTimeSaved: `${avgResponseTimeSavedMinutes}m`,
+      escalationsCount,
+      customerRating: 'N/A',
+      totalAppointments,
+      completedAppointments,
+      cancelledAppointments,
+      successfulAppointments,
+      callsHandled,
+      conversationsHandled,
+      updatedAt: new Date().toISOString(),
     });
   } catch (err) {
     next(err);
@@ -615,16 +633,30 @@ apiRouter.get('/business/settings', async (req: AuthenticatedRequest, res, next)
 apiRouter.patch('/business/settings', async (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const { name, assistantName, phone, email, timezone } = req.body;
+    const {
+      name,
+      phone,
+      email,
+      timezone,
+      assistantTone,
+      bookingPermission,
+      pricingEscalation,
+      doubleBookingPolicy,
+      identityCheckPolicy,
+    } = req.body;
 
     const updated = await prisma.business.update({
       where: { id: tenantId },
       data: {
         ...(name && { name }),
-        ...(assistantName && { assistantName }),
         ...(phone && { phone }),
         ...(email && { email }),
         ...(timezone && { timezone }),
+        ...(assistantTone && { assistantTone }),
+        ...(bookingPermission && { bookingPermission }),
+        ...(pricingEscalation && { pricingEscalation }),
+        ...(doubleBookingPolicy && { doubleBookingPolicy }),
+        ...(identityCheckPolicy && { identityCheckPolicy }),
       },
     });
 

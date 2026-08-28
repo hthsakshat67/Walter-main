@@ -91,6 +91,7 @@ let state = {
 let customerEditor = null;
 let serviceEditor = null;
 let staffEditor = null;
+let appointmentEditor = null;
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -103,7 +104,13 @@ function escapeHtml(value = "") {
 }
 
 function emptyState(title, detail) {
-  return `<div class="empty-state"><h3>${title}</h3><p>${detail}</p></div>`;
+  return `<div class="empty-state"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(detail)}</p></div>`;
+}
+
+function toDateTimeLocalValue(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 // API Services powering the frontend views
@@ -115,6 +122,11 @@ const appointmentService = {
       const data = await apiCall("/appointments");
       state.appointments = data.map((a) => ({
         id: a.id,
+        customerId: a.customerId,
+        serviceId: a.serviceId,
+        staffId: a.staffId,
+        startTime: a.startTime,
+        endTime: a.endTime,
         date: new Date(a.startTime).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
         time: new Date(a.startTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }),
         duration: `${a.service?.durationMinutes || 30}m`,
@@ -123,6 +135,7 @@ const appointmentService = {
         staff: a.staff?.name || "Staff",
         status: a.status,
         channel: a.channel,
+        notes: a.notes || "",
       }));
     } catch (e) {
       console.warn("Using fallback appointment data if unauthorized");
@@ -185,6 +198,9 @@ const serviceCatalog = {
         id: service.id,
         name: service.name,
         description: service.description || "No description yet",
+        durationMinutes: service.durationMinutes || 30,
+        bufferMinutes: service.bufferMinutes || 0,
+        rawPrice: Number(service.price || 0),
         duration: `${service.durationMinutes || 30} min`,
         buffer: `${service.bufferMinutes || 0} min buffer`,
         price: Number(service.price || 0).toLocaleString("en-US", { style: "currency", currency: "USD" }),
@@ -299,6 +315,13 @@ const businessSettingsService = {
   }
 };
 
+const analyticsService = {
+  fetch: async () => {
+    state.analytics = await apiCall("/analytics/overview");
+    return state.analytics;
+  },
+};
+
 const notificationService = {
   messageFor: (action) => `${titleCase(action)} request processed by backend engine.`,
 };
@@ -310,7 +333,7 @@ const stateManager = {
     try {
       const [summary, analytics] = await Promise.all([
         apiCall("/dashboard/summary").catch(() => null),
-        apiCall("/analytics/overview").catch(() => null),
+        analyticsService.fetch().catch(() => null),
         appointmentService.fetch(),
         customerService.fetch(),
         serviceCatalog.fetch(),
@@ -337,6 +360,7 @@ const app = document.querySelector("#app");
 let currentRoute = location.hash.replace("#/", "") || "landing";
 let drawerAppointment = null;
 let toastTimer;
+let analyticsRefreshTimer = null;
 
 function titleCase(value) {
   return `${value[0].toUpperCase()}${value.slice(1)}`;
@@ -549,7 +573,7 @@ function shell(content) {
         ${routes.slice(0, 6).map(([id, label]) => `<button class="nav-link ${currentRoute === id ? "active" : ""}" data-route="${id}">${label}</button>`).join("")}
       </nav>
     </main>
-    ${drawer()}<div class="toast" role="status"></div>
+    ${drawer()}${appointmentForm()}<div class="toast" role="status"></div>
   </div>`;
 }
 
@@ -591,7 +615,7 @@ function appointmentsList(compact = false) {
 function appointmentsPage() {
   return shell(`<div class="page-head">
     <div class="page-copy"><p class="eyebrow">Appointment Management</p><h1>Appointments</h1><p>Book, reschedule, cancel, confirm, and complete appointments while preserving channel and staff context.</p></div>
-    <div class="actions"><button class="btn primary" data-action="book">Book</button><button class="btn" data-action="quick-reschedule">Reschedule</button><button class="btn danger" data-action="cancel">Cancel</button></div>
+    <div class="actions"><button class="btn primary" data-action="book">Book</button></div>
   </div>
   <div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 1 ? "active" : ""}">${tab}</button>`).join("")}</div>
   ${appointmentTable()}`);
@@ -603,6 +627,44 @@ function appointmentTable() {
     <table><thead><tr><th>Time</th><th>Customer</th><th>Service</th><th>Staff</th><th>Channel</th><th>Status</th></tr></thead>
     <tbody>${rows.map((a) => `<tr data-open-appt="${a.id}"><td>${a.time}<br><span class="meta">${a.duration}</span></td><td>${a.customer}</td><td>${a.service}</td><td>${a.staff}</td><td>${a.channel}</td><td><span class="badge ${badgeClass(a.status)}">${a.status}</span></td></tr>`).join("")}</tbody></table>
     <div class="mobile-list">${rows.map((a) => `<button class="row" data-open-appt="${a.id}"><span class="row-main"><span class="row-title">${a.time} - ${a.customer}</span><span class="meta">${a.service} with ${a.staff}</span></span><span class="badge ${badgeClass(a.status)}">${a.status}</span></button>`).join("")}</div>
+  </div>`;
+}
+
+function appointmentForm() {
+  if (!appointmentEditor) return "";
+  const isReschedule = appointmentEditor !== "new";
+  const appointment = isReschedule ? appointmentService.getById(appointmentEditor) : null;
+  const customers = customerService.list();
+  const services = serviceCatalog.list();
+  const staff = staffDirectory.list();
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultStart.getDate() + 1);
+  defaultStart.setHours(10, 0, 0, 0);
+
+  if (!isReschedule && (customers.length === 0 || services.length === 0)) {
+    return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+      <div class="modal-panel auth-form">
+        <div class="page-head compact"><div class="page-copy"><p class="eyebrow">Booking Setup</p><h2>Missing Details</h2></div><button class="btn" type="button" data-action="close-appointment">Close</button></div>
+        <p class="meta">Add at least one customer and one service before booking an appointment.</p>
+        <div class="actions"><button class="btn" type="button" data-action="customer">Add Customer</button><button class="btn primary" type="button" data-action="service">Add Service</button></div>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="appointment-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">${isReschedule ? "Reschedule" : "New Appointment"}</p><h2>${isReschedule ? "Choose A New Time" : "Book Appointment"}</h2></div><button class="btn" type="button" data-action="close-appointment">Close</button></div>
+      ${isReschedule ? `<p class="meta">${escapeHtml(appointment?.customer || "Customer")} - ${escapeHtml(appointment?.service || "Service")} with ${escapeHtml(appointment?.staff || "Staff")}</p>` : `
+        <label>Customer<select class="select" id="appointment-customer" required>${customers.map((customer) => `<option value="${escapeHtml(customer.id)}">${escapeHtml(customer.name)}${customer.phone ? ` - ${escapeHtml(customer.phone)}` : ""}</option>`).join("")}</select></label>
+        <label>Service<select class="select" id="appointment-service" required>${services.map((service) => `<option value="${escapeHtml(service.id)}">${escapeHtml(service.name)} - ${escapeHtml(service.duration)} - ${escapeHtml(service.price)}</option>`).join("")}</select></label>
+        <label>Staff<select class="select" id="appointment-staff"><option value="">Any available staff</option>${staff.map((person) => `<option value="${escapeHtml(person.id)}">${escapeHtml(person.name)} - ${escapeHtml(person.title)}</option>`).join("")}</select></label>
+        <label>Channel<select class="select" id="appointment-channel">${["web", "phone", "email", "whatsapp", "manual"].map((channel) => `<option value="${channel}">${titleCase(channel)}</option>`).join("")}</select></label>
+      `}
+      <label>Start Time<input class="input" id="appointment-start" type="datetime-local" value="${toDateTimeLocalValue(appointment?.startTime || defaultStart)}" required></label>
+      <label>Notes<textarea class="input textarea" id="appointment-notes">${escapeHtml(appointment?.notes || "")}</textarea></label>
+      <div class="form-error" id="appointment-error" hidden></div>
+      <button class="btn primary" type="submit">${isReschedule ? "Save New Time" : "Create Appointment"}</button>
+    </form>
   </div>`;
 }
 
@@ -769,19 +831,27 @@ function automationPage() {
 }
 
 function assistantPage() {
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Assistant Behavior</p><h1>AI Assistant Settings</h1><p>Tune ${assistantName}'s identity, booking permissions, escalation style, and customer-facing tone.</p></div><button class="btn primary" data-action="save">Save Assistant</button></div>
+  const settings = businessSettingsService.get() || {};
+  const tone = settings.assistantTone || "Warm and efficient";
+  const bookingPermission = settings.bookingPermission || "Book, reschedule, and cancel within policy";
+  const pricingEscalation = settings.pricingEscalation || "Escalate";
+  const doubleBookingPolicy = settings.doubleBookingPolicy || "Blocked";
+  const identityCheckPolicy = settings.identityCheckPolicy || "Required";
+
+  return shell(`<form id="assistant-settings-form"><div class="page-head"><div class="page-copy"><p class="eyebrow">Assistant Behavior</p><h1>AI Assistant Settings</h1><p>Tune booking permissions, escalation style, and customer-facing tone.</p></div><button class="btn primary" type="submit">Save Assistant</button></div>
   <div class="grid two-col">
     <section class="panel"><div class="panel-head"><div><h2>${escapeHtml(assistantName)} Profile</h2><p class="meta">The name and tone customers experience across calls and messages.</p></div></div><div class="auth-form">
-      <label>Assistant Name<input class="input" value="${escapeHtml(assistantName)}"></label>
-      <label>Tone<select class="select"><option>Warm and efficient</option><option>Formal and concise</option><option>Friendly and conversational</option></select></label>
-      <label>Booking Permission<select class="select"><option>Book, reschedule, and cancel within policy</option><option>Only suggest available times</option><option>Escalate all schedule changes</option></select></label>
+      <label>Assistant Name<input class="input" value="${escapeHtml(assistantName)}" readonly aria-readonly="true"></label>
+      <label>Tone<select class="select" id="assistant-tone">${["Warm and efficient", "Formal and concise", "Friendly and conversational"].map((option) => `<option ${option === tone ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Booking Permission<select class="select" id="assistant-booking-permission">${["Book, reschedule, and cancel within policy", "Only suggest available times", "Escalate all schedule changes"].map((option) => `<option ${option === bookingPermission ? "selected" : ""}>${option}</option>`).join("")}</select></label>
     </div></section>
     <section class="panel"><div class="panel-head"><div><h2>Escalation Boundaries</h2><p class="meta">Clear limits keep the product trustworthy.</p></div></div><div class="setting-list">
-      ${settingRow("Pricing Questions", "Send to staff when pricing is ambiguous", "Escalate")}
-      ${settingRow("Double Booking", "Never override backend availability checks", "Blocked")}
-      ${settingRow("Customer Identity", "Confirm the person before changing an appointment", "Required")}
+      <label>Pricing Questions<select class="select" id="assistant-pricing-escalation">${["Escalate", "Answer from service catalog", "Always ask staff"].map((option) => `<option ${option === pricingEscalation ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Double Booking<select class="select" id="assistant-double-booking">${["Blocked", "Suggest nearest available time", "Escalate to staff"].map((option) => `<option ${option === doubleBookingPolicy ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Customer Identity<select class="select" id="assistant-identity-check">${["Required", "Required for changes only", "Staff review"].map((option) => `<option ${option === identityCheckPolicy ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <div class="form-error" id="assistant-settings-error" hidden></div>
     </div></section>
-  </div>`);
+  </div></form>`);
 }
 
 function integrationsPage() {
@@ -828,10 +898,11 @@ function settingRow(label, detail, status) {
 }
 
 function analyticsPage() {
-  const data = state.analytics || { bookingSuccessRate: "0%", avgResponseTimeSaved: "0m", escalationsCount: 0, customerRating: "N/A" };
+  const data = state.analytics || { bookingSuccessRate: "0%", avgResponseTimeSaved: "0m", escalationsCount: 0, customerRating: "N/A", totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0, callsHandled: 0, conversationsHandled: 0 };
+  const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Waiting for data";
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Operational Reporting</p><h1>Analytics</h1><p>Outcome-oriented reporting for bookings, escalations, response time, and customer satisfaction.</p></div></div>
   <div class="metric-strip">${metric(data.bookingSuccessRate, "Booking success")}${metric(data.avgResponseTimeSaved, "Avg response saved")}${metric(data.escalationsCount, "Escalations")}${metric(data.customerRating, "Customer rating")}</div>
-  <section class="panel"><h2>Conversation outcomes</h2><p>Resolved appointment requests, confirmations, cancellations, and escalations recorded in database history.</p></section>`);
+  <section class="panel"><div class="panel-head"><div><h2>Live Backend Activity</h2><p class="meta">Last refreshed ${updated}</p></div><span class="badge success">Live</span></div><div class="metric-strip">${metric(data.totalAppointments, "Total appointments")}${metric(data.completedAppointments, "Completed")}${metric(data.cancelledAppointments, "Cancelled")}${metric((data.callsHandled || 0) + (data.conversationsHandled || 0), "Handled interactions")}</div></section>`);
 }
 
 function drawer() {
@@ -1001,11 +1072,87 @@ function attachFormListeners() {
       }
     });
   }
+
+  const appointmentFormEl = document.getElementById("appointment-form-el");
+  if (appointmentFormEl) {
+    appointmentFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("appointment-error");
+      const startTime = new Date(document.getElementById("appointment-start").value).toISOString();
+
+      try {
+        if (appointmentEditor === "new") {
+          const payload = {
+            customerId: document.getElementById("appointment-customer").value,
+            serviceId: document.getElementById("appointment-service").value,
+            staffId: document.getElementById("appointment-staff").value || undefined,
+            startTime,
+            channel: document.getElementById("appointment-channel").value,
+            notes: document.getElementById("appointment-notes").value.trim() || null,
+          };
+          await appointmentService.book(payload);
+          showToast("Appointment booked.");
+        } else {
+          await appointmentService.reschedule(appointmentEditor, startTime);
+          drawerAppointment = null;
+          showToast("Appointment rescheduled.");
+        }
+        appointmentEditor = null;
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Appointment could not be saved.";
+      }
+    });
+  }
+
+  const assistantSettingsForm = document.getElementById("assistant-settings-form");
+  if (assistantSettingsForm) {
+    assistantSettingsForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("assistant-settings-error");
+      const payload = {
+        assistantTone: document.getElementById("assistant-tone").value,
+        bookingPermission: document.getElementById("assistant-booking-permission").value,
+        pricingEscalation: document.getElementById("assistant-pricing-escalation").value,
+        doubleBookingPolicy: document.getElementById("assistant-double-booking").value,
+        identityCheckPolicy: document.getElementById("assistant-identity-check").value,
+      };
+
+      try {
+        await businessSettingsService.update(payload);
+        showToast("Assistant settings saved.");
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Assistant settings could not be saved.";
+      }
+    });
+  }
+}
+
+function syncAnalyticsRefresh() {
+  if (analyticsRefreshTimer && currentRoute !== "analytics") {
+    clearInterval(analyticsRefreshTimer);
+    analyticsRefreshTimer = null;
+  }
+
+  if (currentRoute === "analytics" && currentToken && !analyticsRefreshTimer) {
+    analyticsRefreshTimer = setInterval(async () => {
+      try {
+        await analyticsService.fetch();
+        if (currentRoute === "analytics") render();
+      } catch (err) {
+        console.warn("Analytics refresh failed", err);
+      }
+    }, 5000);
+  }
 }
 
 async function render() {
   app.innerHTML = pageForRoute();
   attachFormListeners();
+  syncAnalyticsRefresh();
 
   document.querySelectorAll("[data-route]").forEach((element) => element.addEventListener("click", () => navigate(element.dataset.route)));
   document.querySelectorAll("[data-open-appt]").forEach((element) => element.addEventListener("click", () => {
@@ -1033,6 +1180,13 @@ async function render() {
 
       if (action === "close-staff") {
         staffEditor = null;
+        render();
+        return;
+      }
+
+      if (action === "close" || action === "close-appointment") {
+        drawerAppointment = null;
+        appointmentEditor = null;
         render();
         return;
       }
@@ -1071,6 +1225,8 @@ async function render() {
         try {
           await appointmentService.confirm(apptId);
           showToast("Appointment confirmed!");
+          drawerAppointment = null;
+          render();
         } catch (e) {
           showToast(e.message);
         }
@@ -1090,52 +1246,14 @@ async function render() {
       }
 
       if (action === "reschedule-appt" && apptId) {
-        const newTime = prompt("Enter new date & time (e.g. 2026-08-17T15:30:00.000Z):", new Date().toISOString());
-        if (newTime) {
-          try {
-            await appointmentService.reschedule(apptId, newTime);
-            showToast("Appointment rescheduled!");
-          } catch (e) {
-            showToast(e.message);
-          }
-        }
+        appointmentEditor = apptId;
+        render();
         return;
       }
 
       if (action === "book") {
-        const custName = prompt("Customer Name:");
-        if (!custName) return;
-        try {
-          const custs = await apiCall("/customers");
-          const srvs = await apiCall("/services");
-          const stff = await apiCall("/staff");
-
-          const normalizedName = custName.trim();
-          const targetCust =
-            custs.find((c) => c.name.toLowerCase() === normalizedName.toLowerCase()) ||
-            (await apiCall("/customers", "POST", { name: normalizedName, segment: "New lead" }));
-          const targetSrv = srvs[0];
-          const targetStff = stff[0];
-
-          if (!targetSrv) throw new Error("Create a service before booking appointments.");
-
-          const tomorrow = new Date();
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          tomorrow.setHours(10, 0, 0, 0);
-
-          await appointmentService.book({
-            customerId: targetCust.id,
-            serviceId: targetSrv.id,
-            staffId: targetStff?.id,
-            startTime: tomorrow.toISOString(),
-            channel: "web",
-            notes: "Booked from dashboard button",
-          });
-
-          showToast("New appointment booked!");
-        } catch (e) {
-          showToast(e.message || "Failed to book appointment");
-        }
+        appointmentEditor = "new";
+        render();
         return;
       }
 

@@ -15,6 +15,11 @@ model Business {
   phone                 String?
   email                 String?
   assistantName         String                @default("Walter")
+  assistantTone         String                @default("Warm and efficient")
+  bookingPermission     String                @default("Book, reschedule, and cancel within policy")
+  pricingEscalation     String                @default("Escalate")
+  doubleBookingPolicy   String                @default("Blocked")
+  identityCheckPolicy   String                @default("Required")
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
 

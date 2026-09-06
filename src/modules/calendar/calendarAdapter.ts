@@ -1,3 +1,5 @@
+import { google } from 'googleapis';
+import { getOAuth2Client } from './googleOAuth.js';
 export interface CalendarEventPayload {
   title: string;
   description: string;
@@ -16,11 +18,19 @@ export class GoogleCalendarAdapter implements CalendarProviderAdapter {
   providerName = 'GOOGLE' as const;
 
   async syncEvent(businessId: string, event: CalendarEventPayload) {
-    // Standard provider abstraction stub: Returns synchronized external event record
-    return {
-      externalId: `gcal_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-      status: 'SYNCHRONIZED',
-    };
+    const oAuth2Client = await getOAuth2Client(businessId);
+    const calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
+    const res = await calendar.events.insert({
+      calendarId: 'primary',
+      requestBody: {
+        summary: event.title,
+        description: event.description,
+        start: { dateTime: event.startTime.toISOString() },
+        end: { dateTime: event.endTime.toISOString() },
+        attendees: event.attendeeEmail ? [{ email: event.attendeeEmail }] : [],
+      },
+    });
+    return { externalId: res.data.id ?? '', status: res.data.status ?? 'unknown' };
   }
 
   async cancelEvent(businessId: string, externalId: string) {

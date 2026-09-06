@@ -1,5 +1,6 @@
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import { CalendarSyncEngine } from '../calendar/calendarAdapter.js';
 
 export interface CreateAppointmentInput {
   businessId: string;
@@ -143,6 +144,11 @@ export class AppointmentEngine {
       return created;
     });
 
+    // Sync to external calendar in background (don't block the API response)
+    CalendarSyncEngine.syncAppointmentToCalendar(businessId, appointment).catch(err => {
+      console.error('Background calendar sync failed:', err);
+    });
+
     return appointment;
   }
 
@@ -207,6 +213,10 @@ export class AppointmentEngine {
       return res;
     });
 
+    CalendarSyncEngine.syncAppointmentToCalendar(businessId, updated).catch(err => {
+      console.error('Background calendar sync failed:', err);
+    });
+
     return updated;
   }
 
@@ -246,6 +256,10 @@ export class AppointmentEngine {
       return res;
     });
 
+    CalendarSyncEngine.syncAppointmentToCalendar(businessId, cancelled).catch(err => {
+      console.error('Background calendar sync failed:', err);
+    });
+
     return cancelled;
   }
 
@@ -276,6 +290,11 @@ export class AppointmentEngine {
         },
       });
 
+      return updated;
+    }).then(updated => {
+      CalendarSyncEngine.syncAppointmentToCalendar(businessId, updated).catch(err => {
+        console.error('Background calendar sync failed:', err);
+      });
       return updated;
     });
   }

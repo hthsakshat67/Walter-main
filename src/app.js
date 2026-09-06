@@ -18,9 +18,18 @@ async function apiCall(endpoint, method = "GET", body = null) {
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, options);
-    const data = await res.json();
+    const text = await res.text();
+    let data = null;
+    if (text.trim()) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Invalid JSON (${res.status})`);
+      }
+    }
     if (!res.ok) {
-      throw new Error(data.error || data.message || "API request failed");
+      const msg = data?.error?.message || data?.error || `Request failed (${res.status})`;
+      throw new Error(msg);
     }
     return data;
   } catch (err) {
@@ -77,12 +86,12 @@ let state = {
   businessSettings: null,
   loading: false,
   error: null,
-  whatsappConnected: localStorage.getItem("whatsapp_connected") === "true",
 };
 
 let customerEditor = null;
-let activeConversationId = null;
-
+let serviceEditor = null;
+let staffEditor = null;
+let appointmentEditor = null;
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -95,7 +104,13 @@ function escapeHtml(value = "") {
 }
 
 function emptyState(title, detail) {
-  return `<div class="empty-state"><h3>${title}</h3><p>${detail}</p></div>`;
+  return `<div class="empty-state"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(detail)}</p></div>`;
+}
+
+function toDateTimeLocalValue(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 // API Services powering the frontend views
@@ -107,6 +122,11 @@ const appointmentService = {
       const data = await apiCall("/appointments");
       state.appointments = data.map((a) => ({
         id: a.id,
+        customerId: a.customerId,
+        serviceId: a.serviceId,
+        staffId: a.staffId,
+        startTime: a.startTime,
+        endTime: a.endTime,
         date: new Date(a.startTime).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
         time: new Date(a.startTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }),
         duration: `${a.service?.durationMinutes || 30}m`,
@@ -115,6 +135,7 @@ const appointmentService = {
         staff: a.staff?.name || "Staff",
         status: a.status,
         channel: a.channel,
+        notes: a.notes || "",
       }));
     } catch (e) {
       console.warn("Using fallback appointment data if unauthorized");
@@ -166,10 +187,6 @@ const customerService = {
     await apiCall(`/customers/${id}`, "PATCH", data);
     await customerService.fetch();
   },
-  delete: async (id) => {
-    await apiCall(`/customers/${id}`, "DELETE");
-    await customerService.fetch();
-  },
 };
 
 const serviceCatalog = {
@@ -181,12 +198,19 @@ const serviceCatalog = {
         id: service.id,
         name: service.name,
         description: service.description || "No description yet",
+        durationMinutes: service.durationMinutes || 30,
+        bufferMinutes: service.bufferMinutes || 0,
+        rawPrice: Number(service.price || 0),
         duration: `${service.durationMinutes || 30} min`,
         buffer: `${service.bufferMinutes || 0} min buffer`,
         price: Number(service.price || 0).toLocaleString("en-US", { style: "currency", currency: "USD" }),
         active: service.active,
       }));
     } catch (e) {}
+  },
+  create: async (data) => {
+    await apiCall("/services", "POST", data);
+    await serviceCatalog.fetch();
   },
 };
 
@@ -205,6 +229,10 @@ const staffDirectory = {
       }));
     } catch (e) {}
   },
+  create: async (data) => {
+    await apiCall("/staff", "POST", data);
+    await staffDirectory.fetch();
+  },
 };
 
 const conversationService = {
@@ -222,7 +250,6 @@ const conversationService = {
         status: c.status,
         handler: c.handler || assistantName,
         result: c.result || "Processed",
-        messages: c.messages || [],
       }));
     } catch (e) {}
   },
@@ -243,6 +270,58 @@ const callService = {
   },
 };
 
+const automationRuleService = {
+  list: () => state.automationRules || [],
+  fetch: async () => {
+    try {
+      state.automationRules = await apiCall("/automation-rules");
+    } catch (e) {}
+  }
+};
+
+const integrationService = {
+  list: () => state.integrations || [],
+  fetch: async () => {
+    try {
+      state.integrations = await apiCall("/integrations");
+    } catch (e) {}
+  }
+};
+
+const billingService = {
+  getSubscription: () => state.subscription || null,
+  fetch: async () => {
+    try {
+      state.subscription = await apiCall("/billing/subscription");
+    } catch (e) {}
+  }
+};
+
+const businessSettingsService = {
+  get: () => state.businessSettings || null,
+  fetch: async () => {
+    try {
+      state.businessSettings = await apiCall("/business/settings");
+      if (state.businessSettings?.assistantName) {
+        assistantName = state.businessSettings.assistantName;
+      }
+    } catch (e) {}
+  },
+  update: async (data) => {
+    const res = await apiCall("/business/settings", "PATCH", data);
+    state.businessSettings = res;
+    if (res.assistantName) assistantName = res.assistantName;
+    return res;
+  }
+};
+
+const analyticsService = {
+  fetch: async () => {
+    state.analytics = await apiCall("/analytics/overview");
+    return state.analytics;
+  },
+};
+
 const notificationService = {
   messageFor: (action) => `${titleCase(action)} request processed by backend engine.`,
 };
@@ -254,13 +333,17 @@ const stateManager = {
     try {
       const [summary, analytics] = await Promise.all([
         apiCall("/dashboard/summary").catch(() => null),
-        apiCall("/analytics/overview").catch(() => null),
+        analyticsService.fetch().catch(() => null),
         appointmentService.fetch(),
         customerService.fetch(),
         serviceCatalog.fetch(),
         staffDirectory.fetch(),
         conversationService.fetch(),
         callService.fetch(),
+        automationRuleService.fetch(),
+        integrationService.fetch(),
+        billingService.fetch(),
+        businessSettingsService.fetch(),
       ]);
       if (summary) state.dashboardSummary = summary;
       if (analytics) state.analytics = analytics;
@@ -277,6 +360,7 @@ const app = document.querySelector("#app");
 let currentRoute = location.hash.replace("#/", "") || "landing";
 let drawerAppointment = null;
 let toastTimer;
+let analyticsRefreshTimer = null;
 
 function titleCase(value) {
   return `${value[0].toUpperCase()}${value.slice(1)}`;
@@ -372,8 +456,7 @@ function landing() {
 function productDemo() {
   const summary = state.dashboardSummary || { appointmentsToday: 0, callsHandled: 0, pendingConfirmations: 0, noShowRisk: 0 };
   return `<div class="product-window">
-    <div class="window-bar"><strong>${currentUser?.businessName || "Your Business"}</strong><span id="header-clock" style="margin-right: 15px; font-weight: 500; font-size: 14px; opacity: 0.85;"></span>
-          <span class="badge success">${assistantName} Online</span></div>
+    <div class="window-bar"><strong>${currentUser?.businessName || "Your Business"}</strong><span class="badge success">${assistantName} Online</span></div>
     <div class="window-body">
       <div class="metric-strip">
         ${metric(summary.appointmentsToday, "Appointments today")}
@@ -490,7 +573,7 @@ function shell(content) {
         ${routes.slice(0, 6).map(([id, label]) => `<button class="nav-link ${currentRoute === id ? "active" : ""}" data-route="${id}">${label}</button>`).join("")}
       </nav>
     </main>
-    ${drawer()}<div class="toast" role="status"></div>
+    ${drawer()}${appointmentForm()}<div class="toast" role="status"></div>
   </div>`;
 }
 
@@ -532,7 +615,7 @@ function appointmentsList(compact = false) {
 function appointmentsPage() {
   return shell(`<div class="page-head">
     <div class="page-copy"><p class="eyebrow">Appointment Management</p><h1>Appointments</h1><p>Book, reschedule, cancel, confirm, and complete appointments while preserving channel and staff context.</p></div>
-    <div class="actions"><button class="btn primary" data-action="book">Book</button><button class="btn" data-action="quick-reschedule">Reschedule</button><button class="btn danger" data-action="cancel">Cancel</button></div>
+    <div class="actions"><button class="btn primary" data-action="book">Book</button></div>
   </div>
   <div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 1 ? "active" : ""}">${tab}</button>`).join("")}</div>
   ${appointmentTable()}`);
@@ -547,27 +630,60 @@ function appointmentTable() {
   </div>`;
 }
 
+function appointmentForm() {
+  if (!appointmentEditor) return "";
+  const isReschedule = appointmentEditor !== "new";
+  const appointment = isReschedule ? appointmentService.getById(appointmentEditor) : null;
+  const customers = customerService.list();
+  const services = serviceCatalog.list();
+  const staff = staffDirectory.list();
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultStart.getDate() + 1);
+  defaultStart.setHours(10, 0, 0, 0);
+
+  if (!isReschedule && (customers.length === 0 || services.length === 0)) {
+    return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+      <div class="modal-panel auth-form">
+        <div class="page-head compact"><div class="page-copy"><p class="eyebrow">Booking Setup</p><h2>Missing Details</h2></div><button class="btn" type="button" data-action="close-appointment">Close</button></div>
+        <p class="meta">Add at least one customer and one service before booking an appointment.</p>
+        <div class="actions"><button class="btn" type="button" data-action="customer">Add Customer</button><button class="btn primary" type="button" data-action="service">Add Service</button></div>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="appointment-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">${isReschedule ? "Reschedule" : "New Appointment"}</p><h2>${isReschedule ? "Choose A New Time" : "Book Appointment"}</h2></div><button class="btn" type="button" data-action="close-appointment">Close</button></div>
+      ${isReschedule ? `<p class="meta">${escapeHtml(appointment?.customer || "Customer")} - ${escapeHtml(appointment?.service || "Service")} with ${escapeHtml(appointment?.staff || "Staff")}</p>` : `
+        <label>Customer<select class="select" id="appointment-customer" required>${customers.map((customer) => `<option value="${escapeHtml(customer.id)}">${escapeHtml(customer.name)}${customer.phone ? ` - ${escapeHtml(customer.phone)}` : ""}</option>`).join("")}</select></label>
+        <label>Service<select class="select" id="appointment-service" required>${services.map((service) => `<option value="${escapeHtml(service.id)}">${escapeHtml(service.name)} - ${escapeHtml(service.duration)} - ${escapeHtml(service.price)}</option>`).join("")}</select></label>
+        <label>Staff<select class="select" id="appointment-staff"><option value="">Any available staff</option>${staff.map((person) => `<option value="${escapeHtml(person.id)}">${escapeHtml(person.name)} - ${escapeHtml(person.title)}</option>`).join("")}</select></label>
+        <label>Channel<select class="select" id="appointment-channel">${["web", "phone", "email", "whatsapp", "manual"].map((channel) => `<option value="${channel}">${titleCase(channel)}</option>`).join("")}</select></label>
+      `}
+      <label>Start Time<input class="input" id="appointment-start" type="datetime-local" value="${toDateTimeLocalValue(appointment?.startTime || defaultStart)}" required></label>
+      <label>Notes<textarea class="input textarea" id="appointment-notes">${escapeHtml(appointment?.notes || "")}</textarea></label>
+      <div class="form-error" id="appointment-error" hidden></div>
+      <button class="btn primary" type="submit">${isReschedule ? "Save New Time" : "Create Appointment"}</button>
+    </form>
+  </div>`;
+}
+
 function calendarPage() {
-  const days = Array.from({ length: 35 }, (_, index) => index + 1);
-  const appointmentsByDay = appointmentService.listToday().reduce((acc, appointment) => {
-    const day = Number(appointment.date.split(" ").pop());
-    if (day) (acc[day] ||= []).push(appointment);
-    return acc;
-  }, {});
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">August 2026</p><h1>Calendar</h1><p>Month view with assistant-driven confirmations and appointment context.</p></div><div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 2 ? "active" : ""}">${tab}</button>`).join("")}</div></div>
-  <div class="calendar">${days.map((day) => `<div class="day"><strong>${day}</strong>${(appointmentsByDay[day] || []).map((appointment) => `<div class="appt-chip">${appointment.time} ${escapeHtml(appointment.customer)}</div>`).join("")}</div>`).join("")}</div>`);
+  const userEmail = currentUser?.email || "en.usa#holiday@group.v.calendar.google.com";
+  return shell(`<div class="page-head">
+    <div class="page-copy"><p class="eyebrow">Interactive View</p><h1>Google Calendar</h1><p>Real-time schedule synchronization.</p></div>
+  </div>
+  <div style="background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); height: 600px; padding: 16px;">
+    <iframe src="https://calendar.google.com/calendar/embed?src=${encodeURIComponent(userEmail)}&ctz=America%2FNew_York&mode=MONTH" style="border: 0" width="100%" height="100%" frameborder="0" scrolling="no"></iframe>
+  </div>`);
 }
 
 function conversationList(items = conversationService.list()) {
   if (items.length === 0) return emptyState("No Active Conversations", "Customer conversations will appear here once calls, emails, or messages are recorded.");
-  return `<div class="list">${items.map((conversation) => {
-    const isActive = activeConversationId === conversation.id || (!activeConversationId && items[0]?.id === conversation.id);
-    if (isActive && !activeConversationId) activeConversationId = conversation.id;
-    return `<div class="row ${isActive ? "active" : ""}" data-open-convo="${conversation.id}" style="cursor: pointer; ${isActive ? 'background: var(--surface-secondary);' : ''}">
-      <span class="row-main"><span class="row-title">${escapeHtml(conversation.customer)}</span><span class="meta">${conversation.channel} - ${conversation.intent} - Handled by ${conversation.handler}</span></span>
-      <span class="badge ${badgeClass(conversation.status)}">${conversation.status}</span>
-    </div>`;
-  }).join("")}</div>`;
+  return `<div class="list">${items.map((conversation) => `<div class="row">
+    <span class="row-main"><span class="row-title">${conversation.customer}</span><span class="meta">${conversation.channel} - ${conversation.intent} - handled by ${conversation.handler}</span></span>
+    <span class="badge ${badgeClass(conversation.status)}">${conversation.status}</span>
+  </div>`).join("")}</div>`;
 }
 
 function activityList() {
@@ -583,126 +699,16 @@ function activityList() {
 function conversationsPage(channel) {
   const title = channel || "Conversations";
   const filtered = channel ? conversationService.byChannel(channel) : conversationService.list();
-
-  if (channel === "WhatsApp" && !state.whatsappConnected) {
-    return shell(`
-      <div class="page-head">
-        <div class="page-copy">
-          <p class="eyebrow">WhatsApp Channel Setup</p>
-          <h1>Connect WhatsApp Business</h1>
-          <p>Link Walter to your business phone number so that it can interact with your clients directly on WhatsApp.</p>
-        </div>
-      </div>
-      <div class="grid two-col">
-        <section class="panel">
-          <h2>Scan QR Code</h2>
-          <p class="meta">Scan the QR code with your WhatsApp app (Settings > Linked Devices > Link a Device) to authorize Walter.</p>
-          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 2rem; background: #fff; border: 1px solid var(--border); border-radius: 8px; margin-top: 1rem;">
-            <svg width="200" height="200" viewBox="0 0 100 100" style="margin-bottom:1.5rem; background:#fff; padding:10px; border:1px solid #ddd;">
-              <rect x="0" y="0" width="30" height="30" fill="#000"/>
-              <rect x="5" y="5" width="20" height="20" fill="#fff"/>
-              <rect x="10" y="10" width="10" height="10" fill="#000"/>
-              <rect x="70" y="0" width="30" height="30" fill="#000"/>
-              <rect x="75" y="5" width="20" height="20" fill="#fff"/>
-              <rect x="80" y="10" width="10" height="10" fill="#000"/>
-              <rect x="0" y="70" width="30" height="30" fill="#000"/>
-              <rect x="5" y="75" width="20" height="20" fill="#fff"/>
-              <rect x="10" y="80" width="10" height="10" fill="#000"/>
-              <rect x="40" y="20" width="10" height="40" fill="#000"/>
-              <rect x="50" y="50" width="20" height="10" fill="#000"/>
-              <rect x="40" y="70" width="20" height="20" fill="#000"/>
-              <rect x="70" y="70" width="15" height="15" fill="#000"/>
-            </svg>
-            <button class="btn primary" id="simulate-qr-scan">Simulate Phone Connection Scan</button>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>Direct Link Setup</h2>
-          <p class="meta">Alternatively, connect by entering your WhatsApp phone number to receive a pairing code.</p>
-          <div class="auth-form" style="margin-top: 1rem;">
-            <label>WhatsApp Number
-              <input type="tel" class="input" id="whatsapp-num-input" placeholder="+1 (555) 000-0000">
-            </label>
-            <button class="btn secondary" id="whatsapp-pairing-btn" style="margin-top:10px;">Generate Pairing Code</button>
-          </div>
-        </section>
-      </div>
-    `);
-  }
-
-  const selectedConvo = filtered.find(c => c.id === activeConversationId) || filtered[0];
-
-  if (!selectedConvo) {
-    return shell(`
-      <div class="page-head">
-        <div class="page-copy">
-          <p class="eyebrow">Unified Conversation Center</p>
-          <h1>${title}</h1>
-        </div>
-      </div>
-      ${emptyState("No Active Conversations", "Chats will appear here once messages are recorded.")}
-    `);
-  }
-
-  const messagesList = (selectedConvo.messages || []).map(msg => {
-    const isAi = msg.senderType === 'AI';
-    const isStaff = msg.senderType === 'STAFF';
-    const align = isAi || isStaff ? 'right' : 'left';
-    const bg = isAi ? 'var(--primary)' : (isStaff ? '#eaeaea' : '#f0f0f0');
-    const color = isAi ? 'var(--primary-contrast)' : '#000';
-    return `<div style="display:flex; justify-content:${align === 'right' ? 'flex-end' : 'flex-start'}; margin-bottom:10px;">
-      <div style="background:	ext {bg}; color:	ext {color}; padding:8px 12px; border-radius:12px; max-width:70%;">
-        <div style="font-size:10px; opacity:0.75; margin-bottom:4px;">${msg.senderType}</div>
-        <div>${escapeHtml(msg.content)}</div>
-      </div>
-    </div>`;
-  }).join('');
-
-  return shell(`
-    <div class="page-head">
-      <div class="page-copy">
-        <p class="eyebrow">WhatsApp Channel Center</p>
-        <h1>WhatsApp Conversations</h1>
-      </div>
-      <div>
-        <span class="badge success" style="margin-right:10px;">WhatsApp Active</span>
-        <button class="btn danger" id="disconnect-whatsapp-btn">Disconnect Number</button>
-      </div>
-    </div>
-    <div class="grid two-col" style="grid-template-columns: 1fr 2fr;">
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Inbox</h2>
-            <p class="meta">${filtered.length} active chats.</p>
-          </div>
-        </div>
-        ${conversationList(filtered)}
-      </section>
-      <section class="panel" style="display:flex; flex-direction:column; min-height: 60vh;">
-        <div class="panel-head" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom: 10px;">
-          <div>
-            <h2>${escapeHtml(selectedConvo.customer)}</h2>
-            <p class="meta">Status: <span class="badge ${badgeClass(selectedConvo.status)}">${selectedConvo.status}</span></p>
-          </div>
-          <div>
-            <label style="display:inline-flex; align-items:center; gap:8px; font-weight:500; font-size:13px; cursor:pointer;">
-              <span>Handled by AI (${assistantName})</span>
-              <input type="checkbox" id="takeover-toggle" ${selectedConvo.handler === 'Staff' ? 'checked' : ''} style="cursor:pointer;">
-              <span>Takeover (Owner)</span>
-            </label>
-          </div>
-        </div>
-        <div class="chat-messages" style="flex:1; overflow-y:auto; padding:15px 0;" id="chat-messages-container">
-          ${messagesList}
-        </div>
-        <form id="chat-reply-form" style="display:flex; gap:10px; border-top:1px solid var(--border); padding-top:10px;">
-          <input type="text" class="input" id="chat-reply-input" placeholder="Type a reply as ${selectedConvo.handler === 'Staff' ? 'Owner (Human)' : 'Walter (AI mockup)'}..." required style="flex:1;">
-          <button class="btn primary" type="submit">Send</button>
-        </form>
-      </section>
-    </div>
-  `);
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified Conversation Center</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><button class="btn">Transfer Selected To Human</button></div>
+  <div class="grid two-col">
+    <section class="panel"><div class="panel-head"><div><h2>Inbox</h2><p class="meta">${filtered.length} conversations in view.</p></div></div>${conversationList(filtered)}</section>
+    <section class="panel"><div class="panel-head"><div><h2>Conversation Detail</h2><p class="meta">Select a conversation to review transcript context.</p></div></div><div class="detail-stack">
+      <p><strong>Intent:</strong> ${filtered[0]?.intent || "No conversation selected"}</p>
+      <p><strong>Result:</strong> ${filtered[0]?.result || "Conversation outcomes will appear here."}</p>
+      <p><strong>Customer:</strong> ${filtered[0]?.customer || "None selected"}</p>
+      <button class="btn">Review transcript</button>
+    </div></section>
+  </div>`);
 }
 
 function callsPage() {
@@ -742,11 +748,7 @@ function customerForm() {
       <label>Segment<select class="select" id="customer-segment">${["Standard", "High value", "Needs confirmation", "No-show risk", "New lead"].map((segment) => `<option ${segment === (customer?.segment || "Standard") ? "selected" : ""}>${segment}</option>`).join("")}</select></label>
       <label>Notes<textarea class="input textarea" id="customer-notes">${escapeHtml(customer?.notes || "")}</textarea></label>
       <div class="form-error" id="customer-error" hidden></div>
-      
-      <div style="display: flex; gap: 10px; justify-content: space-between; width: 100%;">
-        <button class="btn primary" type="submit">${isEditing ? "Save Customer" : "Create Customer"}</button>
-        ${isEditing ? `<button class="btn danger" type="button" id="delete-customer-btn">Delete Customer</button>` : ""}
-      </div>
+      <button class="btn primary" type="submit">${isEditing ? "Save Customer" : "Create Customer"}</button>
     </form>
   </div>`;
 }
@@ -769,57 +771,147 @@ function settingsPage(label) {
 
 function servicesPage() {
   const services = serviceCatalog.list();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Service Catalog</p><h1>Services</h1><p>Define bookable appointments with duration, buffer time, pricing, and active status.</p></div><button class="btn primary" data-action="save">Add Service</button></div>
-  ${services.length === 0 ? emptyState("No Services Yet", "Add services before customers can book appointments.") : `<div class="grid three-col">${services.map((service) => `<article class="card service-card"><div class="card-top"><h3>${escapeHtml(service.name)}</h3><span class="badge ${service.active ? "success" : ""}">${service.active ? "Active" : "Paused"}</span></div><p>${escapeHtml(service.description)}</p><div class="setting-list compact-list">${settingRow("Duration", service.duration, service.price)}${settingRow("Buffer", service.buffer, "Protected")}</div></article>`).join("")}</div>`}`);
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Service Catalog</p><h1>Services</h1><p>Define bookable appointments with duration, buffer time, pricing, and active status.</p></div><button class="btn primary" data-action="service">Add Service</button></div>
+  ${services.length === 0 ? emptyState("No Services Yet", "Add services before customers can book appointments.") : `<div class="grid three-col">${services.map((service) => `<article class="card service-card"><div class="card-top"><h3>${escapeHtml(service.name)}</h3><span class="badge ${service.active ? "success" : ""}">${service.active ? "Active" : "Paused"}</span></div><p>${escapeHtml(service.description)}</p><div class="setting-list compact-list">${settingRow("Duration", service.duration, service.price)}${settingRow("Buffer", service.buffer, "Protected")}</div></article>`).join("")}</div>`}
+  ${serviceForm()}`);
 }
 
 function staffPage() {
   const staff = staffDirectory.list();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Team Routing</p><h1>Staff</h1><p>Manage who receives appointments, which profiles are active, and how staff contact details appear in scheduling workflows.</p></div><button class="btn primary" data-action="save">Invite Staff</button></div>
-  ${staff.length === 0 ? emptyState("No Staff Yet", "Invite team members or create staff profiles for appointment assignment.") : `<div class="grid three-col">${staff.map((person) => `<article class="card staff-card"><div class="avatar">${escapeHtml(person.name.split(" ").map((part) => part[0]).join("").slice(0, 2))}</div><h3>${escapeHtml(person.name)}</h3><p>${escapeHtml(person.title)}</p><div class="setting-list compact-list">${settingRow("Email", person.email, person.active ? "Active" : "Paused")}${settingRow("Phone", person.phone, "Routing")}</div></article>`).join("")}</div>`}`);
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Team Routing</p><h1>Staff</h1><p>Manage who receives appointments, which profiles are active, and how staff contact details appear in scheduling workflows.</p></div><button class="btn primary" data-action="staff">Add Staff</button></div>
+  ${staff.length === 0 ? emptyState("No Staff Yet", "Invite team members or create staff profiles for appointment assignment.") : `<div class="grid three-col">${staff.map((person) => `<article class="card staff-card"><div class="avatar">${escapeHtml(person.name.split(" ").map((part) => part[0]).join("").slice(0, 2))}</div><h3>${escapeHtml(person.name)}</h3><p>${escapeHtml(person.title)}</p><div class="setting-list compact-list">${settingRow("Email", person.email, person.active ? "Active" : "Paused")}${settingRow("Phone", person.phone, "Routing")}</div></article>`).join("")}</div>`}
+  ${staffForm()}`);
+}
+
+function serviceForm() {
+  if (!serviceEditor) return "";
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="service-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">New Service</p><h2>Add Service</h2></div><button class="btn" type="button" data-action="close-service">Close</button></div>
+      <label>Service Name<input class="input" id="service-name" autocomplete="off" required></label>
+      <label>Description<textarea class="input textarea" id="service-description"></textarea></label>
+      <label>Duration Minutes<input class="input" id="service-duration" type="number" min="5" step="5" value="30" required></label>
+      <label>Buffer Minutes<input class="input" id="service-buffer" type="number" min="0" step="5" value="15"></label>
+      <label>Price<input class="input" id="service-price" type="number" min="0" step="0.01" value="0"></label>
+      <div class="form-error" id="service-error" hidden></div>
+      <button class="btn primary" type="submit">Create Service</button>
+    </form>
+  </div>`;
+}
+
+function staffForm() {
+  if (!staffEditor) return "";
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="staff-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">New Staff</p><h2>Add Staff Member</h2></div><button class="btn" type="button" data-action="close-staff">Close</button></div>
+      <label>Full Name<input class="input" id="staff-name" autocomplete="name" required></label>
+      <label>Title<input class="input" id="staff-title" autocomplete="organization-title"></label>
+      <label>Email<input class="input" id="staff-email" type="email" autocomplete="email"></label>
+      <label>Phone<input class="input" id="staff-phone" autocomplete="tel"></label>
+      <div class="form-error" id="staff-error" hidden></div>
+      <button class="btn primary" type="submit">Create Staff</button>
+    </form>
+  </div>`;
 }
 
 function automationPage() {
-  const rules = [
+  const rules = automationRuleService.list();
+  
+  const fallbackRules = [
     ["Confirmation Chase", "Send a reminder when an appointment is still pending 24 hours before start time.", "Ready"],
     ["No-Show Watch", "Flag customers with repeated missed appointments for staff review.", "Monitoring"],
     ["Human Escalation", "Move pricing disputes, medical questions, and unclear requests out of automation.", "Protected"],
   ];
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Automation Rules</p><h1>Automation Rules</h1><p>Control where ${assistantName} acts automatically and where your team stays in the loop.</p></div><button class="btn primary" data-action="save">New Rule</button></div>
-  <div class="grid three-col">${rules.map(([name, detail, status]) => `<article class="card"><div class="card-top"><h3>${name}</h3><span class="badge success">${status}</span></div><p>${detail}</p><div class="rule-flow"><span>Trigger</span><span>Condition</span><span>Action</span></div></article>`).join("")}</div>`);
+  
+  const displayRules = rules.length > 0 ? rules.map(r => [r.name, `${r.triggerEvent} -> ${r.actionType}`, r.active ? 'Active' : 'Inactive']) : fallbackRules;
+  
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Automation Rules</p><h1>Automation Rules</h1><p>Control where ${assistantName} acts automatically and where your team stays in the loop.</p></div><button class="btn primary" data-action="automation-rule">New Rule</button></div>
+  <div class="grid three-col">${displayRules.map(([name, detail, status]) => `<article class="card"><div class="card-top"><h3>${name}</h3><span class="badge ${status === 'Inactive' ? '' : 'success'}">${status}</span></div><p>${detail}</p><div class="rule-flow"><span>Trigger</span><span>Condition</span><span>Action</span></div></article>`).join("")}</div>
+  ${automationRuleForm()}`);
+}
+
+function automationRuleForm() {
+  if (currentRoute !== "automation-rules" || !window.automationEditor) return "";
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="automation-rule-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">New Rule</p><h2>Add Automation Rule</h2></div><button class="btn" type="button" data-action="close-automation-rule">Close</button></div>
+      <label>Rule Name<input class="input" id="rule-name" required></label>
+      <label>Trigger Event
+        <select class="select" id="rule-trigger">
+          <option value="appointment.created">Appointment Created</option>
+          <option value="appointment.cancelled">Appointment Cancelled</option>
+          <option value="customer.created">Customer Created</option>
+        </select>
+      </label>
+      <label>Action Type
+        <select class="select" id="rule-action">
+          <option value="send_email">Send Email</option>
+          <option value="send_sms">Send SMS</option>
+          <option value="create_task">Create Task</option>
+        </select>
+      </label>
+      <label>Payload (JSON)<textarea class="input textarea" id="rule-payload">{"message": "Hello!"}</textarea></label>
+      <div class="form-error" id="rule-error" hidden></div>
+      <button class="btn primary" type="submit">Create Rule</button>
+    </form>
+  </div>`;
 }
 
 function assistantPage() {
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Assistant Behavior</p><h1>AI Assistant Settings</h1><p>Tune ${assistantName}'s identity, booking permissions, escalation style, and customer-facing tone.</p></div><button class="btn primary" data-action="save">Save Assistant</button></div>
+  const settings = businessSettingsService.get() || {};
+  const tone = settings.assistantTone || "Warm and efficient";
+  const bookingPermission = settings.bookingPermission || "Book, reschedule, and cancel within policy";
+  const pricingEscalation = settings.pricingEscalation || "Escalate";
+  const doubleBookingPolicy = settings.doubleBookingPolicy || "Blocked";
+  const identityCheckPolicy = settings.identityCheckPolicy || "Required";
+
+  return shell(`<form id="assistant-settings-form"><div class="page-head"><div class="page-copy"><p class="eyebrow">Assistant Behavior</p><h1>AI Assistant Settings</h1><p>Tune booking permissions, escalation style, and customer-facing tone.</p></div><button class="btn primary" type="submit">Save Assistant</button></div>
   <div class="grid two-col">
     <section class="panel"><div class="panel-head"><div><h2>${escapeHtml(assistantName)} Profile</h2><p class="meta">The name and tone customers experience across calls and messages.</p></div></div><div class="auth-form">
-      <label>Assistant Name<input class="input" value="${escapeHtml(assistantName)}"></label>
-      <label>Tone<select class="select"><option>Warm and efficient</option><option>Formal and concise</option><option>Friendly and conversational</option></select></label>
-      <label>Booking Permission<select class="select"><option>Book, reschedule, and cancel within policy</option><option>Only suggest available times</option><option>Escalate all schedule changes</option></select></label>
+      <label>Assistant Name<input class="input" value="${escapeHtml(assistantName)}" readonly aria-readonly="true"></label>
+      <label>Tone<select class="select" id="assistant-tone">${["Warm and efficient", "Formal and concise", "Friendly and conversational"].map((option) => `<option ${option === tone ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Booking Permission<select class="select" id="assistant-booking-permission">${["Book, reschedule, and cancel within policy", "Only suggest available times", "Escalate all schedule changes"].map((option) => `<option ${option === bookingPermission ? "selected" : ""}>${option}</option>`).join("")}</select></label>
     </div></section>
     <section class="panel"><div class="panel-head"><div><h2>Escalation Boundaries</h2><p class="meta">Clear limits keep the product trustworthy.</p></div></div><div class="setting-list">
-      ${settingRow("Pricing Questions", "Send to staff when pricing is ambiguous", "Escalate")}
-      ${settingRow("Double Booking", "Never override backend availability checks", "Blocked")}
-      ${settingRow("Customer Identity", "Confirm the person before changing an appointment", "Required")}
+      <label>Pricing Questions<select class="select" id="assistant-pricing-escalation">${["Escalate", "Answer from service catalog", "Always ask staff"].map((option) => `<option ${option === pricingEscalation ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Double Booking<select class="select" id="assistant-double-booking">${["Blocked", "Suggest nearest available time", "Escalate to staff"].map((option) => `<option ${option === doubleBookingPolicy ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <label>Customer Identity<select class="select" id="assistant-identity-check">${["Required", "Required for changes only", "Staff review"].map((option) => `<option ${option === identityCheckPolicy ? "selected" : ""}>${option}</option>`).join("")}</select></label>
+      <div class="form-error" id="assistant-settings-error" hidden></div>
     </div></section>
-  </div>`);
+  </div></form>`);
 }
 
 function integrationsPage() {
-  const integrations = [
-    ["Calendar", "Sync staff availability and push confirmed appointments.", "Not Connected"],
-    ["Phone", `Route inbound calls through ${assistantName}.`, "Not Connected"],
-    ["Messaging", "Unify WhatsApp and email conversations.", state.whatsappConnected ? "Connected" : "Not Connected"],
-    ["Payments", "Attach deposits and invoices to booked services.", "Planned"],
+  const activeIntegrations = integrationService.list();
+  
+  const baseIntegrations = [
+    { name: "Calendar", detail: "Sync staff availability and push confirmed appointments.", id: "calendar" },
+    { name: "Phone", detail: `Route inbound calls through ${assistantName}.`, id: "phone" },
+    { name: "Messaging", detail: "Unify WhatsApp and email conversations.", id: "messaging" },
+    { name: "Payments", detail: "Attach deposits and invoices to booked services.", id: "payments" },
   ];
+
+  const displayIntegrations = baseIntegrations.map(base => {
+    const active = activeIntegrations.find(i => i.provider.toLowerCase() === base.id);
+    if (active) {
+      return [base.name, base.detail, active.enabled ? "Connected" : "Paused", active.enabled ? "success" : ""];
+    }
+    return [base.name, base.detail, "Not Connected", ""];
+  });
+
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div><button class="btn primary" data-action="save">Connect App</button></div>
-  <div class="grid four-col">${integrations.map(([name, detail, status]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge">${status}</span></article>`).join("")}</div>`);
+  <div class="grid four-col">${displayIntegrations.map(([name, detail, status, badgeCls]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge ${badgeCls}">${status}</span></article>`).join("")}</div>`);
 }
 
 function billingPage() {
+  const sub = billingService.getSubscription();
+  const planName = sub?.plan || "Setup Needed";
+  const statusBadge = sub?.status === "ACTIVE" ? "success" : "warning";
+  const balance = "$0";
+
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Plan And Usage</p><h1>Billing</h1><p>Track subscription status, receptionist usage, and billing controls for this workspace.</p></div><button class="btn primary" data-action="save">Manage Plan</button></div>
   <div class="grid two-col">
-    <section class="panel"><div class="panel-head"><div><h2>Current Plan</h2><p class="meta">Workspace billing summary.</p></div><span class="badge warning">Setup Needed</span></div><div class="metric-strip billing-metrics">${metric("Starter", "Plan")}${metric("$0", "Current balance")}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Current Plan</h2><p class="meta">Workspace billing summary.</p></div><span class="badge ${statusBadge}">${sub?.status || 'Setup Needed'}</span></div><div class="metric-strip billing-metrics">${metric(planName, "Plan")}${metric(balance, "Current balance")}</div></section>
     <section class="panel"><div class="panel-head"><div><h2>Usage Controls</h2><p class="meta">Protect costs while call volume grows.</p></div></div><div class="setting-list">
       ${settingRow("Monthly Call Limit", "Set a cap before overage billing begins", "Unset")}
       ${settingRow("SMS Reminders", "Bill only when reminders are enabled", "Available")}
@@ -833,10 +925,11 @@ function settingRow(label, detail, status) {
 }
 
 function analyticsPage() {
-  const data = state.analytics || { bookingSuccessRate: "0%", avgResponseTimeSaved: "0m", escalationsCount: 0, customerRating: "N/A" };
+  const data = state.analytics || { bookingSuccessRate: "0%", avgResponseTimeSaved: "0m", escalationsCount: 0, customerRating: "N/A", totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0, callsHandled: 0, conversationsHandled: 0 };
+  const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Waiting for data";
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Operational Reporting</p><h1>Analytics</h1><p>Outcome-oriented reporting for bookings, escalations, response time, and customer satisfaction.</p></div></div>
   <div class="metric-strip">${metric(data.bookingSuccessRate, "Booking success")}${metric(data.avgResponseTimeSaved, "Avg response saved")}${metric(data.escalationsCount, "Escalations")}${metric(data.customerRating, "Customer rating")}</div>
-  <section class="panel"><h2>Conversation outcomes</h2><p>Resolved appointment requests, confirmations, cancellations, and escalations recorded in database history.</p></section>`);
+  <section class="panel"><div class="panel-head"><div><h2>Live Backend Activity</h2><p class="meta">Last refreshed ${updated}</p></div><span class="badge success">Live</span></div><div class="metric-strip">${metric(data.totalAppointments, "Total appointments")}${metric(data.completedAppointments, "Completed")}${metric(data.cancelledAppointments, "Cancelled")}${metric((data.callsHandled || 0) + (data.conversationsHandled || 0), "Handled interactions")}</div></section>`);
 }
 
 function drawer() {
@@ -958,116 +1051,160 @@ function attachFormListeners() {
     });
   }
 
-  const deleteCustomerBtn = document.getElementById("delete-customer-btn");
-  if (deleteCustomerBtn) {
-    deleteCustomerBtn.addEventListener("click", async () => {
-      if (!confirm("Are you sure you want to delete this customer? This will also delete their appointments.")) return;
-      try {
-        await customerService.delete(customerEditor);
-        showToast("Customer deleted successfully.");
-        customerEditor = null;
-        render();
-      } catch (err) {
-        showToast(err.message || "Failed to delete customer");
-      }
-    });
-  }
-
-  // WhatsApp Simulate Connection
-  const simulateScanBtn = document.getElementById("simulate-qr-scan");
-  if (simulateScanBtn) {
-    simulateScanBtn.addEventListener("click", () => {
-      localStorage.setItem("whatsapp_connected", "true");
-      state.whatsappConnected = true;
-      showToast("WhatsApp successfully connected!");
-      render();
-    });
-  }
-
-  const disconnectWhatsappBtn = document.getElementById("disconnect-whatsapp-btn");
-  if (disconnectWhatsappBtn) {
-    disconnectWhatsappBtn.addEventListener("click", () => {
-      localStorage.removeItem("whatsapp_connected");
-      state.whatsappConnected = false;
-      showToast("WhatsApp disconnected.");
-      render();
-    });
-  }
-
-  // Conversation open
-  document.querySelectorAll("[data-open-convo]").forEach((element) => {
-    element.addEventListener("click", () => {
-      activeConversationId = element.dataset.openConvo;
-      render();
-    });
-  });
-
-  // Handler Takeover Toggle
-  const takeoverToggle = document.getElementById("takeover-toggle");
-  if (takeoverToggle) {
-    takeoverToggle.addEventListener("change", async (e) => {
-      const handlerVal = e.target.checked ? "Staff" : assistantName;
-      try {
-        await apiCall(`/conversations/${activeConversationId}`, "PATCH", {
-          handler: handlerVal,
-          status: e.target.checked ? "Human review" : "Resolved"
-        });
-        showToast(e.target.checked ? "Owner took over the chat." : "Handover back to Walter AI.");
-        await stateManager.loadAll();
-        render();
-      } catch (err) {
-        showToast(err.message || "Failed to update handler");
-      }
-    });
-  }
-
-  // Chat reply form
-  const chatReplyForm = document.getElementById("chat-reply-form");
-  if (chatReplyForm) {
-    chatReplyForm.addEventListener("submit", async (e) => {
+  const serviceFormEl = document.getElementById("service-form-el");
+  if (serviceFormEl) {
+    serviceFormEl.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const input = document.getElementById("chat-reply-input");
-      const contentStr = input.value.trim();
-      if (!contentStr) return;
-
-      const filtered = conversationService.byChannel("WhatsApp");
-      const selectedConvo = filtered.find(c => c.id === activeConversationId) || filtered[0];
-      const senderType = selectedConvo.handler === 'Staff' ? 'STAFF' : 'AI';
+      const errorDiv = document.getElementById("service-error");
+      const payload = {
+        name: document.getElementById("service-name").value.trim(),
+        description: document.getElementById("service-description").value.trim() || null,
+        durationMinutes: Number(document.getElementById("service-duration").value || 30),
+        bufferMinutes: Number(document.getElementById("service-buffer").value || 0),
+        price: Number(document.getElementById("service-price").value || 0),
+      };
 
       try {
-        await apiCall(`/conversations/${selectedConvo.id}/messages`, "POST", {
-          senderType,
-          content: contentStr
-        });
-
-        input.value = '';
-        await stateManager.loadAll();
+        await serviceCatalog.create(payload);
+        serviceEditor = null;
+        showToast(`${payload.name} was added.`);
         render();
-
-        if (selectedConvo.handler !== 'Staff') {
-          setTimeout(async () => {
-            try {
-              await apiCall(`/conversations/${selectedConvo.id}/messages`, "POST", {
-                senderType: 'CUSTOMER',
-                content: "Sure, let's proceed with that."
-              });
-              await stateManager.loadAll();
-              render();
-            } catch (err) {}
-          }, 1500);
-        }
       } catch (err) {
-        showToast(err.message || "Failed to send message");
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Service could not be saved.";
       }
     });
   }
 
+  const staffFormEl = document.getElementById("staff-form-el");
+  if (staffFormEl) {
+    staffFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("staff-error");
+      const payload = {
+        name: document.getElementById("staff-name").value.trim(),
+        title: document.getElementById("staff-title").value.trim() || null,
+        email: document.getElementById("staff-email").value.trim() || null,
+        phone: document.getElementById("staff-phone").value.trim() || null,
+      };
+
+      try {
+        await staffDirectory.create(payload);
+        staffEditor = null;
+        showToast(`${payload.name} was added.`);
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Staff member could not be saved.";
+      }
+    });
+  }
+
+  const appointmentFormEl = document.getElementById("appointment-form-el");
+  if (appointmentFormEl) {
+    appointmentFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("appointment-error");
+      const startTime = new Date(document.getElementById("appointment-start").value).toISOString();
+
+      try {
+        if (appointmentEditor === "new") {
+          const payload = {
+            customerId: document.getElementById("appointment-customer").value,
+            serviceId: document.getElementById("appointment-service").value,
+            staffId: document.getElementById("appointment-staff").value || undefined,
+            startTime,
+            channel: document.getElementById("appointment-channel").value,
+            notes: document.getElementById("appointment-notes").value.trim() || null,
+          };
+          await appointmentService.book(payload);
+          showToast("Appointment booked.");
+        } else {
+          await appointmentService.reschedule(appointmentEditor, startTime);
+          drawerAppointment = null;
+          showToast("Appointment rescheduled.");
+        }
+        appointmentEditor = null;
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Appointment could not be saved.";
+      }
+    });
+  }
+
+  const automationRuleFormEl = document.getElementById("automation-rule-form-el");
+  if (automationRuleFormEl) {
+    automationRuleFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("rule-error");
+      const payload = {
+        name: document.getElementById("rule-name").value.trim(),
+        triggerEvent: document.getElementById("rule-trigger").value,
+        actionType: document.getElementById("rule-action").value,
+        payload: document.getElementById("rule-payload").value.trim(),
+      };
+
+      try {
+        await apiCall("/automation-rules", "POST", payload);
+        window.automationEditor = null;
+        await automationRuleService.fetch();
+        showToast(`Rule '${payload.name}' was created.`);
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Rule could not be saved.";
+      }
+    });
+  }
+
+  const assistantSettingsForm = document.getElementById("assistant-settings-form");
+  if (assistantSettingsForm) {
+    assistantSettingsForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("assistant-settings-error");
+      const payload = {
+        assistantTone: document.getElementById("assistant-tone").value,
+        bookingPermission: document.getElementById("assistant-booking-permission").value,
+        pricingEscalation: document.getElementById("assistant-pricing-escalation").value,
+        doubleBookingPolicy: document.getElementById("assistant-double-booking").value,
+        identityCheckPolicy: document.getElementById("assistant-identity-check").value,
+      };
+
+      try {
+        await businessSettingsService.update(payload);
+        showToast("Assistant settings saved.");
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Assistant settings could not be saved.";
+      }
+    });
+  }
+}
+
+function syncAnalyticsRefresh() {
+  if (analyticsRefreshTimer && currentRoute !== "analytics") {
+    clearInterval(analyticsRefreshTimer);
+    analyticsRefreshTimer = null;
+  }
+
+  if (currentRoute === "analytics" && currentToken && !analyticsRefreshTimer) {
+    analyticsRefreshTimer = setInterval(async () => {
+      try {
+        await analyticsService.fetch();
+        if (currentRoute === "analytics") render();
+      } catch (err) {
+        console.warn("Analytics refresh failed", err);
+      }
+    }, 5000);
+  }
 }
 
 async function render() {
   app.innerHTML = pageForRoute();
-  updateClock();
   attachFormListeners();
+  syncAnalyticsRefresh();
 
   document.querySelectorAll("[data-route]").forEach((element) => element.addEventListener("click", () => navigate(element.dataset.route)));
   document.querySelectorAll("[data-open-appt]").forEach((element) => element.addEventListener("click", () => {
@@ -1075,249 +1212,121 @@ async function render() {
     render();
   }));
 
-  document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", async () => {
-    const action = element.dataset.action;
-    const apptId = element.dataset.id || drawerAppointment;
+  // Generic action dispatcher for all UI buttons
+  document.querySelectorAll("[data-action]").forEach((element) => {
+    element.addEventListener("click", async () => {
+      const action = element.dataset.action;
+      const apptId = element.dataset.id; // May be undefined for non-appointment actions
 
-    if (action === "close") {
-      drawerAppointment = null;
-      render();
-      return;
-    }
-
-    if (action === "close-customer") {
-      customerEditor = null;
-      render();
-      return;
-    }
-
-    if (action === "customer") {
-      currentRoute = "customers";
-      location.hash = "/customers";
-      customerEditor = "new";
-      render();
-      return;
-    }
-
-    if (action === "edit-customer") {
-      customerEditor = element.dataset.id;
-      render();
-      return;
-    }
-
-    if (action === "confirm-appt" && apptId) {
-      try {
-        await appointmentService.confirm(apptId);
-        showToast("Appointment confirmed!");
-      } catch (e) { showToast(e.message); }
-      return;
-    }
-
-    if (action === "cancel-appt" && apptId) {
-      if (!confirm("Cancel this appointment?")) return;
-      try {
-        await appointmentService.cancel(apptId);
-        drawerAppointment = null;
-        showToast("Appointment cancelled.");
-      } catch (e) { showToast(e.message); }
-      return;
-    }
-
-    if (action === "reschedule-appt" && apptId) {
-      const newTime = prompt("Enter new date & time (e.g. 2026-08-17T15:30:00.000Z):", new Date().toISOString());
-      if (newTime) {
-        try {
-          await appointmentService.reschedule(apptId, newTime);
-          showToast("Appointment rescheduled!");
-        } catch (e) { showToast(e.message); }
+      if (action === "close-customer") {
+        customerEditor = null;
+        render();
+        return;
       }
-      return;
-    }
 
-    if (action === "book") {
-      showBookingDialog();
-      return;
-    }
+      if (action === "close-service") {
+        serviceEditor = null;
+        render();
+        return;
+      }
 
-    showToast(notificationService.messageFor(action));
-  }));
-}
+      if (action === "close-automation-rule") {
+        window.automationEditor = null;
+        render();
+        return;
+      }
 
+      if (action === "automation-rule") {
+        currentRoute = "automation-rules";
+        location.hash = "/automation-rules";
+        window.automationEditor = "new";
+        render();
+        return;
+      }
 
-function bookingModal(date, slots) {
-  const customerOptions = state.customers.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  const serviceOptions = state.services.map(s => `<option value="${s.id}">${escapeHtml(s.name)} ($${s.price})</option>`).join('');
-  const staffOptions = state.staff.map(st => `<option value="${st.id}">${escapeHtml(st.name)}</option>`).join('');
+      if (action === "close-staff") {
+        staffEditor = null;
+        render();
+        return;
+      }
 
-  return `
-    <div class="modal-backdrop open" role="dialog" aria-modal="true" style="z-index: 1000;">
-      <div class="modal-panel auth-form" style="max-height: 90vh; overflow-y: auto;">
-        <div class="page-head compact">
-          <div class="page-copy">
-            <p class="eyebrow">New Appointment</p>
-            <h2>Book Appointment</h2>
-          </div>
-          <button class="btn" type="button" id="cancel-booking">Close</button>
-        </div>
-        
-        <label for="booking-customer">Customer</label>
-        <select id="booking-customer" class="select" required>
-          <option value="">-- Select Customer --</option>
-          ${customerOptions}
-        </select>
-        
-        <label for="booking-service">Service</label>
-        <select id="booking-service" class="select" required>
-          <option value="">-- Select Service --</option>
-          ${serviceOptions}
-        </select>
-        
-        <label for="booking-staff">Staff</label>
-        <select id="booking-staff" class="select">
-          <option value="">-- Select Staff (Optional) --</option>
-          ${staffOptions}
-        </select>
+      if (action === "close" || action === "close-appointment") {
+        drawerAppointment = null;
+        appointmentEditor = null;
+        render();
+        return;
+      }
 
-        <label for="booking-date">Date</label>
-        <input type="date" id="booking-date" class="input" value="${date}" min="${new Date().toISOString().split('T')[0]}" required />
-        
-        <label>Time Slot</label>
-        <div class="slot-grid" id="booking-slots-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 15px;">
-          ${slots.map(slot => `
-            <button class="slot-btn" type="button" data-time="	ext {slot}">${slot}</button>
-          `).join('')}
-        </div>
-        
-        <div class="modal-actions" style="display: flex; gap: 10px; justify-content: flex-end;">
-          <button class="btn primary" id="confirm-booking" type="button">Confirm</button>
-          <button class="btn" id="cancel-booking-btn" type="button">Cancel</button>
-        </div>
-      </div>
-    </div>`;
-}
+      if (action === "customer") {
+        currentRoute = "customers";
+        location.hash = "/customers";
+        customerEditor = "new";
+        render();
+        return;
+      }
 
-function showBookingDialog() {
-  const today = new Date().toISOString().split('T')[0];
-  const availableSlots = getAvailableSlots(new Date());
-  
-  let modalRoot = document.getElementById('modal-root');
-  if (!modalRoot) {
-    modalRoot = document.createElement('div');
-    modalRoot.id = 'modal-root';
-    document.body.appendChild(modalRoot);
-  }
-  
-  modalRoot.innerHTML = bookingModal(today, availableSlots);
-  attachBookingDialogListeners();
-}
+      if (action === "service") {
+        currentRoute = "services";
+        location.hash = "/services";
+        serviceEditor = "new";
+        render();
+        return;
+      }
 
-function hideBookingDialog() {
-  const modalRoot = document.getElementById('modal-root');
-  if (modalRoot) {
-    modalRoot.innerHTML = '';
-  }
-}
+      if (action === "staff") {
+        currentRoute = "staff";
+        location.hash = "/staff";
+        staffEditor = "new";
+        render();
+        return;
+      }
 
-function getAvailableSlots(dateObj) {
-  const slots = [];
-  const start = new Date(dateObj);
-  start.setHours(9, 0, 0, 0);
-  const end = new Date(dateObj);
-  end.setHours(17, 0, 0, 0);
-  for (let t = new Date(start); t < end; t.setMinutes(t.getMinutes() + 15)) {
-    const overlap = state.appointments.some(appt => {
-      const apptDate = new Date(appt.startTime);
-      return apptDate.toDateString() === dateObj.toDateString() &&
-             Math.abs(apptDate - t) < 15 * 60 * 1000;
+      if (action === "edit-customer") {
+        customerEditor = element.dataset.id;
+        render();
+        return;
+      }
+
+      if (action === "confirm-appt" && apptId) {
+        try {
+          await appointmentService.confirm(apptId);
+          showToast("Appointment confirmed!");
+          drawerAppointment = null;
+          render();
+        } catch (e) {
+          showToast(e.message);
+        }
+        return;
+      }
+
+      if (action === "cancel-appt" && apptId) {
+        if (!confirm("Cancel this appointment?")) return;
+        try {
+          await appointmentService.cancel(apptId);
+          drawerAppointment = null;
+          showToast("Appointment cancelled.");
+        } catch (e) {
+          showToast(e.message);
+        }
+        return;
+      }
+
+      if (action === "reschedule-appt" && apptId) {
+        appointmentEditor = apptId;
+        render();
+        return;
+      }
+
+      if (action === "book") {
+        appointmentEditor = "new";
+        render();
+        return;
+      }
+
+      // Fallback for other actions – use notification service messages
+      showToast(notificationService.messageFor(action));
     });
-    if (!overlap) {
-      slots.push(t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }));
-    }
-  }
-  return slots;
-}
-
-function attachBookingDialogListeners() {
-  const modal = document.querySelector('.modal-backdrop');
-  if (!modal) return;
-  const dateInput = modal.querySelector('#booking-date');
-  const slotContainer = modal.querySelector('#booking-slots-grid');
-  const confirmBtn = modal.querySelector('#confirm-booking');
-  const cancelBtn = modal.querySelector('#cancel-booking');
-  const cancelBtn2 = modal.querySelector('#cancel-booking-btn');
-
-  dateInput.addEventListener('change', () => {
-    const selectedDate = new Date(dateInput.value);
-    const today = new Date();
-    if (selectedDate < new Date(today.toDateString())) {
-      showToast('Cannot book in the past');
-      dateInput.value = today.toISOString().split('T')[0];
-      return;
-    }
-    const newSlots = getAvailableSlots(selectedDate);
-    slotContainer.innerHTML = newSlots.map(s => `<button class="slot-btn" type="button" data-time="${s}">${s}</button>`).join('');
   });
-
-  slotContainer.addEventListener('click', e => {
-    if (e.target.matches('.slot-btn')) {
-      slotContainer.querySelectorAll('.slot-btn').forEach(btn => btn.classList.remove('selected'));
-      e.target.classList.add('selected');
-    }
-  });
-
-  confirmBtn.addEventListener('click', async () => {
-    const customerId = modal.querySelector('#booking-customer').value;
-    const serviceId = modal.querySelector('#booking-service').value;
-    const staffId = modal.querySelector('#booking-staff').value || null;
-    const selectedDate = dateInput.value;
-    const selectedSlotBtn = slotContainer.querySelector('.slot-btn.selected');
-    
-    if (!customerId) {
-      showToast('Please select a customer');
-      return;
-    }
-    if (!serviceId) {
-      showToast('Please select a service');
-      return;
-    }
-    if (!selectedSlotBtn) {
-      showToast('Please select a time slot');
-      return;
-    }
-
-    const timeStr = selectedSlotBtn.dataset.time;
-    const [time, modifier] = timeStr.split(' ');
-    let [hours, minutes] = time.split(':');
-    if (hours === '12') {
-      hours = '00';
-    }
-    if (modifier === 'PM') {
-      hours = parseInt(hours, 10) + 12;
-    }
-    const dt = new Date(selectedDate);
-    dt.setHours(hours, minutes, 0, 0);
-
-    const payload = {
-      startTime: dt.toISOString(),
-      serviceId,
-      staffId,
-      customerId,
-      channel: 'web'
-    };
-
-    try {
-      await appointmentService.book(payload);
-      showToast(`Booked appointment successfully!`);
-      hideBookingDialog();
-      render();
-    } catch (err) {
-      showToast(err.message || 'Failed to book appointment');
-    }
-  });
-
-  const closeDialog = () => hideBookingDialog();
-  if (cancelBtn) cancelBtn.addEventListener('click', closeDialog);
-  if (cancelBtn2) cancelBtn2.addEventListener('click', closeDialog);
 }
 
 // Boot sequence: check session & load state
@@ -1329,28 +1338,3 @@ function attachBookingDialogListeners() {
     render();
   }
 })();
-
-function updateClock() {
-  const clockEl = document.getElementById("header-clock");
-  if (clockEl) {
-    const tz = (currentUser && currentUser.business && currentUser.business.timezone) || "America/New_York";
-    try {
-      clockEl.textContent = new Date().toLocaleTimeString("en-US", {
-        timeZone: tz,
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true
-      });
-    } catch (e) {
-      clockEl.textContent = new Date().toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true
-      });
-    }
-  }
-}
-
-updateClock();
-setInterval(updateClock, 1000);
-

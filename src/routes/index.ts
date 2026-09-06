@@ -512,20 +512,73 @@ apiRouter.get('/staff', async (req: AuthenticatedRequest, res, next) => {
   }
 });
 
-apiRouter.post('/staff', async (req: AuthenticatedRequest, res, next) => {
+// -------------------------------------------------------------
+// 6. AUTOMATION RULES
+// -------------------------------------------------------------
+
+apiRouter.get('/automation-rules', async (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
-    const { name, email, phone, title } = req.body;
-    if (!name) throw new AppError('Staff name is required', 400);
-
-    const newStaff = await prisma.staff.create({
-      data: { businessId: tenantId, name, email, phone, title },
-    });
-    return res.status(201).json(newStaff);
+    const rules = await prisma.automationRule.findMany({ where: { businessId: tenantId } });
+    return res.json(rules);
   } catch (err) {
     next(err);
   }
 });
+
+apiRouter.post('/automation-rules', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { name, triggerEvent, actionType, payload } = req.body;
+    if (!name || !triggerEvent || !actionType) throw new AppError('Missing required fields', 400);
+    const rule = await prisma.automationRule.create({
+      data: { businessId: tenantId, name, triggerEvent, actionType, payload },
+    });
+    return res.status(201).json(rule);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.patch('/automation-rules/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { id } = req.params;
+    const { name, triggerEvent, actionType, payload, active } = req.body;
+    const updated = await prisma.automationRule.update({
+      where: { id },
+      data: { name, triggerEvent, actionType, payload, active },
+    });
+    return res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.delete('/automation-rules/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const { id } = req.params;
+    await prisma.automationRule.delete({ where: { id } });
+    return res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+    apiRouter.post('/staff', async (req: AuthenticatedRequest, res, next) => {
+      try {
+        const tenantId = getTenantId(req);
+        const { name, email, phone, title } = req.body;
+        if (!name) throw new AppError('Staff name is required', 400);
+
+        const newStaff = await prisma.staff.create({
+          data: { businessId: tenantId, name, email, phone, title },
+        });
+        return res.status(201).json(newStaff);
+      } catch (err) {
+        next(err);
+      }
+    });
 
 // -------------------------------------------------------------
 // 5. UNIFIED CONVERSATIONS & CALLS

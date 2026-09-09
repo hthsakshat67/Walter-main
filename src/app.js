@@ -699,7 +699,8 @@ function activityList() {
 function conversationsPage(channel) {
   const title = channel || "Conversations";
   const filtered = channel ? conversationService.byChannel(channel) : conversationService.list();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified Conversation Center</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><button class="btn">Transfer Selected To Human</button></div>
+  const syncBtn = channel === "Email" ? `<button class="btn" data-action="sync-emails">Sync Emails</button>` : "";
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified Conversation Center</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><div>${syncBtn} <button class="btn">Transfer Selected To Human</button></div></div>
   <div class="grid two-col">
     <section class="panel"><div class="panel-head"><div><h2>Inbox</h2><p class="meta">${filtered.length} conversations in view.</p></div></div>${conversationList(filtered)}</section>
     <section class="panel"><div class="panel-head"><div><h2>Conversation Detail</h2><p class="meta">Select a conversation to review transcript context.</p></div></div><div class="detail-stack">
@@ -1320,6 +1321,19 @@ async function render() {
       if (action === "book") {
         appointmentEditor = "new";
         render();
+        return;
+      }
+
+      if (action === "sync-emails") {
+        showToast("Syncing emails...");
+        try {
+          const res = await apiCall("/conversations/email/sync", "POST");
+          showToast(`Synced ${res.syncedCount || 0} new emails.`);
+          await conversationService.fetch();
+          render();
+        } catch (e) {
+          showToast(e.message || "Failed to sync emails.");
+        }
         return;
       }
 

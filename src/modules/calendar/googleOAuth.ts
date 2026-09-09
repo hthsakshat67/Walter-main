@@ -2,7 +2,12 @@ import { google } from 'googleapis';
 import { prisma } from '../../db/prisma.js';
 import { OAuth2Client } from 'google-auth-library';
 
-const SCOPES = ['https://www.googleapis.com/auth/calendar'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.modify'
+];
 
 /**
  * Returns an OAuth2 client for the given business.
@@ -85,6 +90,7 @@ export async function exchangeCodeForTokens(businessId: string, code: string): P
     where: { businessId },
     create: {
       businessId,
+      provider: 'GOOGLE',
       accessToken: tokens.access_token ?? undefined,
       refreshToken: tokens.refresh_token ?? undefined,
     },

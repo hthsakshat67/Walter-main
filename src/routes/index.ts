@@ -8,6 +8,7 @@ import { AIToolLayer } from '../modules/ai/aiToolLayer.js';
 import { ConversationService } from '../modules/conversations/conversationService.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
+import { GmailService } from '../modules/email/gmailService.js';
 // Helper to retrieve a business ID for webhook processing (fallback to first business)
 async function getBusinessIdFromWebhook(req) {
   // Try to read a custom header set by the client, else fallback
@@ -878,7 +879,11 @@ apiRouter.post('/conversations/:id/messages', async (req: AuthenticatedRequest, 
     const message = await ConversationService.addMessage(tenantId, req.params.id, senderType, content);
 
     // If the conversation is being handled by the owner (human), forward to WhatsApp
-    const conv = await prisma.conversation.findUnique({ where: { id: req.params.id } });
+    const conv = await prisma.conversation.findUnique({ 
+      where: { id: req.params.id },
+      include: { customer: true }
+    });
+    
     if (conv && conv.handler === 'owner' && conv.channel === 'whatsapp') {
       const phone = conv.customer?.phone;
       if (phone) {
@@ -890,7 +895,29 @@ apiRouter.post('/conversations/:id/messages', async (req: AuthenticatedRequest, 
       }
     }
 
+    if (conv && conv.channel === 'email' && senderType !== 'customer') {
+      const email = conv.customer?.email;
+      if (email) {
+        try {
+          const subject = `Re: Conversation with ${conv.customer?.name || 'Customer'}`;
+          await GmailService.sendEmail(tenantId, email, subject, content);
+        } catch (e) {
+          console.error('Failed to forward message to Gmail', e);
+        }
+      }
+    }
+
     return res.status(201).json(message);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/conversations/email/sync', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const result = await GmailService.syncIncomingEmails(tenantId);
+    return res.json(result);
   } catch (err) {
     next(err);
   }

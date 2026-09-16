@@ -77,7 +77,7 @@ label { display: grid; gap: var(--space-2); color: var(--text); font-size: 13px;
 }
 .brand-logo {
   width: 100%;
-  max-width: 208px;
+  max-width: 232px;
   height: auto;
   display: block;
 }
@@ -576,6 +576,7 @@ tbody tr:hover { background: var(--surface-secondary); }
   gap: var(--space-5);
 }
 .auth-brand { justify-content: center; padding: 0; }
+.auth-brand .brand-logo { max-width: 260px; }
 .auth-copy { display: grid; gap: var(--space-2); text-align: center; }
 .auth-copy h1 { font-size: 34px; }
 .auth-form {

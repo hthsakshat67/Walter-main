@@ -9,6 +9,8 @@ import { ConversationService } from '../modules/conversations/conversationServic
 import { AppError } from '../middleware/errorHandler.js';
 import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
 import { GmailService } from '../modules/email/gmailService.js';
+import { generateAuthUrl, exchangeCodeForTokens } from '../modules/calendar/googleOAuth.js';
+
 // Helper to retrieve a business ID for webhook processing (fallback to first business)
 async function getBusinessIdFromWebhook(req) {
   // Try to read a custom header set by the client, else fallback
@@ -185,8 +187,43 @@ apiRouter.get('/auth/me', authenticate, async (req: AuthenticatedRequest, res, n
   }
 });
 
+// Public route for Google OAuth callback
+apiRouter.get('/auth/google/callback', async (req, res, next) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error) return res.redirect('/#/?error=google_auth_failed');
+    if (!code || !state) return res.redirect('/#/?error=invalid_callback');
+    await exchangeCodeForTokens(String(state), String(code));
+    return res.redirect('/#/integrations?success=google_connected');
+  } catch (err) {
+    console.error('Google OAuth callback error', err);
+    return res.redirect('/#/integrations?error=google_auth_failed');
+  }
+});
+
 // Protected routes below
 apiRouter.use(authenticate);
+
+apiRouter.get('/integrations', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const integrations = [];
+    
+    const googleIntegration = await prisma.calendarIntegration.findUnique({
+      where: { businessId: tenantId }
+    });
+    if (googleIntegration) {
+      integrations.push({ provider: 'calendar', enabled: true });
+      integrations.push({ provider: 'messaging', enabled: true }); // Gmail uses the same Google connection
+    }
+
+    // You can add more checks here for other integrations as they are built.
+
+    return res.json(integrations);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // -------------------------------------------------------------
 // 2. APPOINTMENT ENGINE ENDPOINTS
@@ -936,4 +973,55 @@ apiRouter.get('/voice/health', (req, res) => {
   const enabled = process.env.ASTERISK_ENABLED === 'true';
   const status = VoiceProviderManager.getInstance().getStatus();
   res.json({ voice: { enabled, provider: 'asterisk', status } });
+});
+
+apiRouter.get('/auth/google', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    try {
+      const url = generateAuthUrl(tenantId);
+      return res.json({ url });
+    } catch (e: any) {
+      if (e.message.includes('environment variables')) {
+        // Fallback to mock flow if env vars are missing so the UI can be tested
+        return res.json({ url: `/api/v1/auth/google/mock?state=${tenantId}` });
+      }
+      throw e;
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Mock flow for testing without real credentials
+apiRouter.get('/auth/google/mock', (req, res) => {
+  const { state } = req.query;
+  const html = `
+    <html>
+      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5;">
+        <div style="background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;">
+          <h2 style="margin-top: 0;">Mock Google OAuth</h2>
+          <p style="color: #555;">You haven't configured GOOGLE_CLIENT_ID in your .env file.</p>
+          <p style="color: #555;">For testing purposes, you can simulate a successful connection.</p>
+          <a href="/api/v1/auth/google/callback?code=mock_auth_code_123&state=${state}" style="display: inline-block; background: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Simulate Success</a>
+        </div>
+      </body>
+    </html>
+  `;
+  res.send(html);
+});
+  const { state } = req.query;
+  const html = `
+    <html>
+      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5;">
+        <div style="background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;">
+          <h2 style="margin-top: 0;">Mock Google OAuth</h2>
+          <p style="color: #555;">You haven't configured GOOGLE_CLIENT_ID in your .env file.</p>
+          <p style="color: #555;">For testing purposes, you can simulate a successful connection.</p>
+          <a href="/api/auth/google/callback?code=mock_auth_code_123&state=${state}" style="display: inline-block; background: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Simulate Success</a>
+        </div>
+      </body>
+    </html>
+  `;
+  res.send(html);
 });

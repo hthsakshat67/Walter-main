@@ -1,0 +1,26 @@
+--- src/routes/index.ts
++++ src/routes/index.ts
+@@ -10,6 +10,7 @@
+ import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
+ import { GmailService } from '../modules/email/gmailService.js';
++import { generateAuthUrl, exchangeCodeForTokens } from '../modules/calendar/googleOAuth.js';
+ // Helper to retrieve a business ID for webhook processing (fallback to first business)
+ async function getBusinessIdFromWebhook(req: any) {
+@@ -186,6 +187,17 @@
+ });
+ 
++apiRouter.get('/auth/google/callback', async (req, res, next) => {
++  try {
++    const { code, state, error } = req.query;
++    if (error) return res.redirect('/#/?error=google_auth_failed');
++    if (!code || !state) return res.redirect('/#/?error=invalid_callback');
++    await exchangeCodeForTokens(String(state), String(code));
++    return res.redirect('/#/integrations?success=google_connected');
++  } catch (err) {
++    console.error('Google OAuth callback error', err);
++    return res.redirect('/#/integrations?error=google_auth_failed');
++  }
++});
++
+ // Protected routes below
+ apiRouter.use(authenticate);

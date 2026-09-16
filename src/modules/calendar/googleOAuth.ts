@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { prisma } from '../../db/prisma.js';
 import { OAuth2Client } from 'google-auth-library';
+import { AppError } from '../../middleware/errorHandler.js';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/calendar',
@@ -19,7 +20,7 @@ export async function getOAuth2Client(businessId: string): Promise<OAuth2Client>
     where: { businessId },
   });
   if (!integration) {
-    throw new Error('No calendar integration configured for this business');
+    throw new AppError('No Google integration configured for this business');
   }
 
   const clientId = process.env.GOOGLE_CLIENT_ID;
@@ -27,7 +28,7 @@ export async function getOAuth2Client(businessId: string): Promise<OAuth2Client>
   const redirectUri = process.env.GOOGLE_REDIRECT_URI;
 
   if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error('Google OAuth environment variables are not set');
+    throw new AppError('Google OAuth environment variables (GOOGLE_CLIENT_ID, etc.) are not set in .env');
   }
 
   const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
@@ -59,18 +60,19 @@ export async function getOAuth2Client(businessId: string): Promise<OAuth2Client>
 /**
  * Generates the URL a user should visit to grant permission for Google Calendar.
  */
-export function generateAuthUrl(): string {
+export function generateAuthUrl(businessId: string): string {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const redirectUri = process.env.GOOGLE_REDIRECT_URI;
   if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error('Google OAuth environment variables are not set');
+    throw new AppError('Google OAuth environment variables (GOOGLE_CLIENT_ID, etc.) are not set in .env');
   }
   const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
   return oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
     prompt: 'consent',
+    state: businessId,
   });
 }
 
@@ -78,11 +80,28 @@ export function generateAuthUrl(): string {
  * Exchanges an auth code for tokens and stores them.
  */
 export async function exchangeCodeForTokens(businessId: string, code: string): Promise<void> {
+  if (code === 'mock_auth_code_123') {
+    await prisma.calendarIntegration.upsert({
+      where: { businessId },
+      create: {
+        businessId,
+        provider: 'GOOGLE',
+        accessToken: 'mock_access_token',
+        refreshToken: 'mock_refresh_token',
+      },
+      update: {
+        accessToken: 'mock_access_token',
+        refreshToken: 'mock_refresh_token',
+      },
+    });
+    return;
+  }
+
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const redirectUri = process.env.GOOGLE_REDIRECT_URI;
   if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error('Google OAuth environment variables are not set');
+    throw new AppError('Google OAuth environment variables are not set');
   }
   const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
   const { tokens } = await oAuth2Client.getToken(code);

@@ -391,7 +391,16 @@ function navigate(route) {
 }
 
 window.addEventListener("hashchange", () => {
-  currentRoute = location.hash.replace("#/", "") || "landing";
+  const hashVal = location.hash.replace("#/", "");
+  const [path, query] = hashVal.split("?");
+  currentRoute = path || "landing";
+  
+  if (query) {
+    const params = new URLSearchParams(query);
+    if (params.get("success")) showToast(params.get("success").replace(/_/g, " "));
+    if (params.get("error")) showToast("Error: " + params.get("error").replace(/_/g, " "));
+  }
+  
   drawerAppointment = null;
   customerEditor = null;
   render();
@@ -399,7 +408,7 @@ window.addEventListener("hashchange", () => {
 
 function brand(extraClass = "") {
   return `<a class="brand ${extraClass}" href="#/landing" aria-label="AI Receptionist home">
-    <span class="brand-mark">W</span>
+    <span class="brand-mark"><img src="./assets/walter-ai-logo.png" alt="Walter AI logo"></span>
     <span class="brand-copy"><span>AI Receptionist</span><small>${assistantName} front desk</small></span>
   </a>`;
 }
@@ -886,22 +895,23 @@ function integrationsPage() {
   const activeIntegrations = integrationService.list();
   
   const baseIntegrations = [
-    { name: "Calendar", detail: "Sync staff availability and push confirmed appointments.", id: "calendar" },
+    { name: "Calendar", detail: "Sync staff availability and push confirmed appointments.", id: "calendar", action: "connect-google" },
     { name: "Phone", detail: `Route inbound calls through ${assistantName}.`, id: "phone" },
-    { name: "Messaging", detail: "Unify WhatsApp and email conversations.", id: "messaging" },
+    { name: "Messaging (Gmail)", detail: "Unify WhatsApp and email conversations via Gmail.", id: "messaging", action: "connect-google" },
     { name: "Payments", detail: "Attach deposits and invoices to booked services.", id: "payments" },
   ];
 
   const displayIntegrations = baseIntegrations.map(base => {
     const active = activeIntegrations.find(i => i.provider.toLowerCase() === base.id);
     if (active) {
-      return [base.name, base.detail, active.enabled ? "Connected" : "Paused", active.enabled ? "success" : ""];
+      return `<article class="card integration-card"><h3>${base.name}</h3><p>${base.detail}</p><span class="badge ${active.enabled ? 'success' : ''}">${active.enabled ? 'Connected' : 'Paused'}</span></article>`;
     }
-    return [base.name, base.detail, "Not Connected", ""];
+    const buttonHtml = base.action ? `<button class="btn" data-action="${base.action}">Connect</button>` : `<span class="badge">Coming Soon</span>`;
+    return `<article class="card integration-card"><h3>${base.name}</h3><p>${base.detail}</p>${buttonHtml}</article>`;
   });
 
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div><button class="btn primary" data-action="save">Connect App</button></div>
-  <div class="grid four-col">${displayIntegrations.map(([name, detail, status, badgeCls]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge ${badgeCls}">${status}</span></article>`).join("")}</div>`);
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div></div>
+  <div class="grid four-col">${displayIntegrations.join("")}</div>`);
 }
 
 function billingPage() {
@@ -1333,6 +1343,17 @@ async function render() {
           render();
         } catch (e) {
           showToast(e.message || "Failed to sync emails.");
+        }
+        return;
+      }
+
+      if (action === "connect-google") {
+        showToast("Redirecting to Google Auth...");
+        try {
+          const res = await apiCall("/auth/google");
+          if (res.url) window.location.href = res.url;
+        } catch (e) {
+          showToast(e.message || "Failed to initiate Google connection.");
         }
         return;
       }

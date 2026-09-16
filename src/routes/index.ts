@@ -8,6 +8,7 @@ import { AIToolLayer } from '../modules/ai/aiToolLayer.js';
 import { ConversationService } from '../modules/conversations/conversationService.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
+import { VoiceProviderManager } from '../modules/voice/voiceProviderManager.js';
 import { GmailService } from '../modules/email/gmailService.js';
 import { generateAuthUrl, exchangeCodeForTokens } from '../modules/calendar/googleOAuth.js';
 
@@ -199,6 +200,28 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
     console.error('Google OAuth callback error', err);
     return res.redirect('/#/integrations?error=google_auth_failed');
   }
+});
+
+// Mock flow for local testing without real Google OAuth credentials.
+// This must stay public because the browser navigates here without API headers.
+apiRouter.get('/auth/google/mock', (req, res) => {
+  const { state } = req.query;
+  if (!state) return res.redirect('/#/integrations?error=invalid_google_state');
+
+  const callbackUrl = `/api/v1/auth/google/callback?code=mock_auth_code_123&state=${encodeURIComponent(String(state))}`;
+  const html = `
+    <html>
+      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f5efdf;">
+        <div style="background: #fffaf0; padding: 40px; border: 1px solid #ded2bc; border-radius: 8px; box-shadow: 0 18px 48px rgba(23,63,42,0.08); text-align: center; max-width: 460px;">
+          <h2 style="margin-top: 0; color: #172019;">Mock Google OAuth</h2>
+          <p style="color: #647065;">Google OAuth credentials are not configured in your .env file.</p>
+          <p style="color: #647065;">Use this local-only flow to simulate a successful Google Calendar and Gmail connection.</p>
+          <a href="${callbackUrl}" style="display: inline-block; background: #173f2a; color: #fffaf0; padding: 12px 20px; text-decoration: none; border-radius: 8px; margin-top: 20px; font-weight: 700;">Simulate Success</a>
+        </div>
+      </body>
+    </html>
+  `;
+  res.send(html);
 });
 
 // Protected routes below
@@ -991,22 +1014,4 @@ apiRouter.get('/auth/google', async (req: AuthenticatedRequest, res, next) => {
   } catch (err) {
     next(err);
   }
-});
-
-// Mock flow for testing without real credentials
-apiRouter.get('/auth/google/mock', (req, res) => {
-  const { state } = req.query;
-  const html = `
-    <html>
-      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5;">
-        <div style="background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;">
-          <h2 style="margin-top: 0;">Mock Google OAuth</h2>
-          <p style="color: #555;">You haven't configured GOOGLE_CLIENT_ID in your .env file.</p>
-          <p style="color: #555;">For testing purposes, you can simulate a successful connection.</p>
-          <a href="/api/v1/auth/google/callback?code=mock_auth_code_123&state=${state}" style="display: inline-block; background: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Simulate Success</a>
-        </div>
-      </body>
-    </html>
-  `;
-  res.send(html);
 });

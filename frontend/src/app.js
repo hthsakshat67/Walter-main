@@ -2,7 +2,19 @@ let assistantName = "Walter";
 let currentUser = null;
 let currentToken = localStorage.getItem("auth_token") || null;
 
-const API_BASE = "/api/v1";
+const backendOrigin = (() => {
+  const override = localStorage.getItem("api_base_url");
+  if (override) return override.replace(/\/$/, "");
+
+  const { hostname, port, protocol } = window.location;
+  const isLocalFrontend = ["3000", "3001", "5173", "5500", "8080"].includes(port);
+  if (protocol.startsWith("http") && ["localhost", "127.0.0.1"].includes(hostname) && isLocalFrontend) {
+    return `${protocol}//${hostname}:3003`;
+  }
+
+  return "";
+})();
+const API_BASE = `${backendOrigin}/api/v1`;
 
 // Helper for authenticated API calls
 async function apiCall(endpoint, method = "GET", body = null) {
@@ -24,7 +36,7 @@ async function apiCall(endpoint, method = "GET", body = null) {
       try {
         data = JSON.parse(text);
       } catch {
-        throw new Error(`Invalid JSON (${res.status})`);
+        throw new Error(`Unexpected response from server (${res.status}). Check that the backend is running on port 3003.`);
       }
     }
     if (!res.ok) {

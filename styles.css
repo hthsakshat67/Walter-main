@@ -75,6 +75,12 @@ label { display: grid; gap: var(--space-2); color: var(--text); font-size: 13px;
   padding: 0 var(--space-2) var(--space-5);
   font-weight: 700;
 }
+.brand-logo {
+  width: 100%;
+  max-width: 208px;
+  height: auto;
+  display: block;
+}
 .brand-mark {
   width: 42px;
   height: 42px;

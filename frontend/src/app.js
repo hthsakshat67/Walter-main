@@ -399,8 +399,7 @@ window.addEventListener("hashchange", () => {
 
 function brand(extraClass = "") {
   return `<a class="brand ${extraClass}" href="#/landing" aria-label="AI Receptionist home">
-    <span class="brand-mark"><img src="./assets/walter-ai-logo.png" alt="Walter AI logo"></span>
-    <span class="brand-copy"><span>AI Receptionist</span><small>${assistantName} front desk</small></span>
+    <img class="brand-logo" src="./assets/walter-ai-logo.png" alt="Walter AI">
   </a>`;
 }
 

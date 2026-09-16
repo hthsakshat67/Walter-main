@@ -1010,18 +1010,3 @@ apiRouter.get('/auth/google/mock', (req, res) => {
   `;
   res.send(html);
 });
-  const { state } = req.query;
-  const html = `
-    <html>
-      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5;">
-        <div style="background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;">
-          <h2 style="margin-top: 0;">Mock Google OAuth</h2>
-          <p style="color: #555;">You haven't configured GOOGLE_CLIENT_ID in your .env file.</p>
-          <p style="color: #555;">For testing purposes, you can simulate a successful connection.</p>
-          <a href="/api/auth/google/callback?code=mock_auth_code_123&state=${state}" style="display: inline-block; background: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Simulate Success</a>
-        </div>
-      </body>
-    </html>
-  `;
-  res.send(html);
-});
